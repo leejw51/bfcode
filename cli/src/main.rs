@@ -3,6 +3,7 @@ mod persistence;
 mod tools;
 mod types;
 
+use anyhow::{Context, Result};
 use colored::Colorize;
 use std::io::Write;
 use std::sync::Arc;
@@ -15,8 +16,9 @@ const MAX_TOOL_ROUNDS: usize = 25;
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let api_key = std::env::var("GROK_API_KEY").expect("GROK_API_KEY environment variable not set");
+async fn main() -> Result<()> {
+    let api_key =
+        std::env::var("GROK_API_KEY").context("GROK_API_KEY environment variable not set")?;
 
     // Load global config
     let mut config = persistence::load_config();
@@ -46,7 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .insert(0, Message::system(&full_system_prompt));
     }
 
-    let client = api::GrokClient::new(api_key);
+    let client = api::GrokClient::new(api_key)?;
     let tool_defs = tools::get_tool_definitions();
     let permissions = tools::Permissions::new();
 
@@ -217,7 +219,7 @@ fn handle_command(
     session: &mut ProjectSession,
     config: &mut GlobalConfig,
     full_system_prompt: &str,
-) -> Result<CommandResult, Box<dyn std::error::Error>> {
+) -> Result<CommandResult> {
     let parts: Vec<&str> = input.splitn(2, ' ').collect();
     let cmd = parts[0];
     let arg = parts.get(1).map(|s| s.trim()).unwrap_or("");
@@ -388,7 +390,7 @@ fn start_spinner(running: Arc<AtomicBool>) -> tokio::task::JoinHandle<()> {
 
 // --- Helpers ---
 
-fn format_tokens(tokens: u64) -> String {
+pub(crate) fn format_tokens(tokens: u64) -> String {
     if tokens >= 1_000_000 {
         format!("{:.1}M", tokens as f64 / 1_000_000.0)
     } else if tokens >= 1_000 {

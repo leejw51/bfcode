@@ -1,4 +1,5 @@
 use crate::types::{ChatRequest, ChatResponse, Message, ToolDefinition};
+use anyhow::{Context, Result, bail};
 use std::time::Duration;
 
 const MAX_RETRIES: u32 = 3;
@@ -12,15 +13,16 @@ pub struct GrokClient {
 }
 
 impl GrokClient {
-    pub fn new(api_key: String) -> Self {
-        Self {
-            client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(300))
-                .build()
-                .unwrap_or_else(|_| reqwest::Client::new()),
+    pub fn new(api_key: String) -> Result<Self> {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(300))
+            .build()
+            .context("Failed to build HTTP client")?;
+        Ok(Self {
+            client,
             api_key,
             api_url: "https://api.x.ai/v1/chat/completions".into(),
-        }
+        })
     }
 
     pub async fn chat(
@@ -29,7 +31,7 @@ impl GrokClient {
         tools: &[ToolDefinition],
         model: &str,
         temperature: f64,
-    ) -> Result<ChatResponse, Box<dyn std::error::Error>> {
+    ) -> Result<ChatResponse> {
         let request = ChatRequest {
             model: model.into(),
             messages: messages.to_vec(),
@@ -71,7 +73,7 @@ impl GrokClient {
                     if e.is_timeout() || e.is_connect() {
                         continue; // Retry on network errors
                     }
-                    return Err(last_error.into());
+                    bail!("{last_error}");
                 }
             };
 
@@ -88,7 +90,7 @@ impl GrokClient {
 
             if status.is_success() {
                 let chat_response: ChatResponse = serde_json::from_str(&body)
-                    .map_err(|e| format!("Failed to parse response: {e}\nBody: {body}"))?;
+                    .with_context(|| format!("Failed to parse response: {body}"))?;
                 return Ok(chat_response);
             }
 
@@ -99,9 +101,9 @@ impl GrokClient {
             }
 
             // Non-retryable error
-            return Err(format!("API error {status}: {body}").into());
+            bail!("API error {status}: {body}");
         }
 
-        Err(format!("Max retries exceeded. Last error: {last_error}").into())
+        bail!("Max retries exceeded. Last error: {last_error}");
     }
 }

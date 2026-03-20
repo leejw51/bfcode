@@ -1,4 +1,5 @@
 use crate::types::*;
+use anyhow::{Context, Result, bail, ensure};
 use colored::Colorize;
 use std::collections::HashSet;
 use std::sync::Mutex;
@@ -138,16 +139,18 @@ impl Permissions {
 
     /// Check if a tool action is always allowed
     fn is_allowed(&self, key: &str) -> bool {
-        let allowed = self.always_allowed.lock().unwrap();
-        // Check exact match or wildcard
-        allowed.contains(key)
-            || allowed.contains(&format!("{}:*", key.split(':').next().unwrap_or("")))
+        let Ok(allowed) = self.always_allowed.lock() else {
+            return false;
+        };
+        let prefix = key.split(':').next().unwrap_or("");
+        allowed.contains(key) || allowed.contains(&format!("{prefix}:*"))
     }
 
     /// Add a pattern to always-allowed list
     fn allow_always(&self, key: &str) {
-        let mut allowed = self.always_allowed.lock().unwrap();
-        allowed.insert(key.to_string());
+        if let Ok(mut allowed) = self.always_allowed.lock() {
+            allowed.insert(key.to_string());
+        }
     }
 
     /// Ask user for permission. Returns true if allowed.
@@ -216,7 +219,7 @@ pub async fn execute_tool(name: &str, arguments: &str, permissions: &Permissions
         "glob" => exec_glob(arguments).await,
         "grep" => exec_grep(arguments).await,
         "list_files" => exec_list_files(arguments).await,
-        _ => Err(format!("Unknown tool: {name}")),
+        _ => Err(anyhow::anyhow!("Unknown tool: {name}")),
     };
 
     match result {
@@ -312,7 +315,7 @@ pub fn print_tool_result(result: &str) {
 }
 
 /// Truncate output to reasonable limits (inspired by opencode: 2000 lines / 50KB)
-fn truncate_output(output: &str) -> String {
+pub(crate) fn truncate_output(output: &str) -> String {
     let lines: Vec<&str> = output.lines().collect();
 
     if lines.len() > MAX_OUTPUT_LINES {
@@ -343,11 +346,11 @@ fn truncate_output(output: &str) -> String {
 
 // --- Tool Implementations ---
 
-async fn exec_read(arguments: &str) -> Result<String, String> {
-    let args: ReadArgs = serde_json::from_str(arguments).map_err(|e| e.to_string())?;
+async fn exec_read(arguments: &str) -> Result<String> {
+    let args: ReadArgs = serde_json::from_str(arguments)?;
     let content = tokio::fs::read_to_string(&args.path)
         .await
-        .map_err(|e| format!("reading {}: {e}", args.path))?;
+        .with_context(|| format!("reading {}", args.path))?;
 
     let lines: Vec<&str> = content.lines().collect();
     let total_lines = lines.len();
@@ -383,15 +386,15 @@ async fn exec_read(arguments: &str) -> Result<String, String> {
     Ok(output)
 }
 
-async fn exec_write(arguments: &str) -> Result<String, String> {
-    let args: WriteArgs = serde_json::from_str(arguments).map_err(|e| e.to_string())?;
+async fn exec_write(arguments: &str) -> Result<String> {
+    let args: WriteArgs = serde_json::from_str(arguments)?;
 
     // Create parent directories if needed
     if let Some(parent) = std::path::Path::new(&args.path).parent() {
         if !parent.as_os_str().is_empty() {
             tokio::fs::create_dir_all(parent)
                 .await
-                .map_err(|e| format!("creating directories: {e}"))?;
+                .context("creating directories")?;
         }
     }
 
@@ -399,7 +402,7 @@ async fn exec_write(arguments: &str) -> Result<String, String> {
     let line_count = args.content.lines().count();
     tokio::fs::write(&args.path, &args.content)
         .await
-        .map_err(|e| format!("writing {}: {e}", args.path))?;
+        .with_context(|| format!("writing {}", args.path))?;
 
     Ok(format!(
         "Wrote {len} bytes ({line_count} lines) to {}",
@@ -407,16 +410,17 @@ async fn exec_write(arguments: &str) -> Result<String, String> {
     ))
 }
 
-async fn exec_edit(arguments: &str) -> Result<String, String> {
-    let args: EditArgs = serde_json::from_str(arguments).map_err(|e| e.to_string())?;
+async fn exec_edit(arguments: &str) -> Result<String> {
+    let args: EditArgs = serde_json::from_str(arguments)?;
 
-    if args.old_string == args.new_string {
-        return Err("old_string and new_string must be different".into());
-    }
+    ensure!(
+        args.old_string != args.new_string,
+        "old_string and new_string must be different"
+    );
 
     let content = tokio::fs::read_to_string(&args.path)
         .await
-        .map_err(|e| format!("reading {}: {e}", args.path))?;
+        .with_context(|| format!("reading {}", args.path))?;
 
     let replace_all = args.replace_all.unwrap_or(false);
     let match_count = content.matches(&args.old_string).count();
@@ -426,22 +430,21 @@ async fn exec_edit(arguments: &str) -> Result<String, String> {
         let trimmed_old = args.old_string.trim();
         let trimmed_count = content.matches(trimmed_old).count();
         if trimmed_count > 0 {
-            return Err(format!(
+            bail!(
                 "No exact match found, but found {trimmed_count} match(es) with trimmed whitespace. Check indentation/whitespace in old_string."
-            ));
+            );
         }
-        return Err(format!(
+        bail!(
             "old_string not found in {}. Read the file first to see its current content.",
             args.path
-        ));
+        );
     }
 
-    if match_count > 1 && !replace_all {
-        return Err(format!(
-            "Found {match_count} matches for old_string in {}. Provide more context to make it unique, or set replace_all=true.",
-            args.path
-        ));
-    }
+    ensure!(
+        match_count == 1 || replace_all,
+        "Found {match_count} matches for old_string in {}. Provide more context to make it unique, or set replace_all=true.",
+        args.path
+    );
 
     let new_content = if replace_all {
         content.replace(&args.old_string, &args.new_string)
@@ -451,7 +454,7 @@ async fn exec_edit(arguments: &str) -> Result<String, String> {
 
     tokio::fs::write(&args.path, &new_content)
         .await
-        .map_err(|e| format!("writing {}: {e}", args.path))?;
+        .with_context(|| format!("writing {}", args.path))?;
 
     // Generate a simple diff summary
     let old_lines = args.old_string.lines().count();
@@ -464,8 +467,8 @@ async fn exec_edit(arguments: &str) -> Result<String, String> {
     ))
 }
 
-async fn exec_bash(arguments: &str) -> Result<String, String> {
-    let args: BashArgs = serde_json::from_str(arguments).map_err(|e| e.to_string())?;
+async fn exec_bash(arguments: &str) -> Result<String> {
+    let args: BashArgs = serde_json::from_str(arguments)?;
     let timeout_secs = args.timeout.unwrap_or(120);
 
     let result = tokio::time::timeout(
@@ -476,8 +479,8 @@ async fn exec_bash(arguments: &str) -> Result<String, String> {
             .output(),
     )
     .await
-    .map_err(|_| format!("Command timed out after {timeout_secs}s"))?
-    .map_err(|e| format!("executing command: {e}"))?;
+    .with_context(|| format!("Command timed out after {timeout_secs}s"))?
+    .context("executing command")?;
 
     let stdout = String::from_utf8_lossy(&result.stdout);
     let stderr = String::from_utf8_lossy(&result.stderr);
@@ -494,12 +497,10 @@ async fn exec_bash(arguments: &str) -> Result<String, String> {
     Ok(output)
 }
 
-async fn exec_glob(arguments: &str) -> Result<String, String> {
-    let args: GlobArgs = serde_json::from_str(arguments).map_err(|e| e.to_string())?;
+async fn exec_glob(arguments: &str) -> Result<String> {
+    let args: GlobArgs = serde_json::from_str(arguments)?;
     let base_path = args.path.as_deref().unwrap_or(".");
 
-    // Use find + glob pattern via shell for simplicity
-    // Alternatively, could use the `glob` crate but shell is fine for v1
     let result = tokio::process::Command::new("sh")
         .arg("-c")
         .arg(format!(
@@ -509,7 +510,7 @@ async fn exec_glob(arguments: &str) -> Result<String, String> {
         ))
         .output()
         .await
-        .map_err(|e| format!("running glob: {e}"))?;
+        .context("running glob")?;
 
     let output = String::from_utf8_lossy(&result.stdout).to_string();
 
@@ -524,7 +525,7 @@ async fn exec_glob(arguments: &str) -> Result<String, String> {
             ))
             .output()
             .await
-            .map_err(|e| format!("running glob: {e}"))?;
+            .context("running glob")?;
 
         let output = String::from_utf8_lossy(&result.stdout).to_string();
         if output.trim().is_empty() {
@@ -538,8 +539,8 @@ async fn exec_glob(arguments: &str) -> Result<String, String> {
     Ok(format!("{output}({count} files found)"))
 }
 
-async fn exec_grep(arguments: &str) -> Result<String, String> {
-    let args: GrepArgs = serde_json::from_str(arguments).map_err(|e| e.to_string())?;
+async fn exec_grep(arguments: &str) -> Result<String> {
+    let args: GrepArgs = serde_json::from_str(arguments)?;
     let search_path = args.path.as_deref().unwrap_or(".");
 
     let mut cmd_args = vec!["-rn".to_string(), "--color=never".to_string()];
@@ -560,7 +561,7 @@ async fn exec_grep(arguments: &str) -> Result<String, String> {
         .args(&cmd_args)
         .output()
         .await
-        .map_err(|e| format!("running grep: {e}"))?;
+        .context("running grep")?;
 
     let output = String::from_utf8_lossy(&result.stdout).to_string();
 
@@ -591,15 +592,15 @@ async fn exec_grep(arguments: &str) -> Result<String, String> {
     }
 }
 
-async fn exec_list_files(arguments: &str) -> Result<String, String> {
-    let args: ListFilesArgs = serde_json::from_str(arguments).map_err(|e| e.to_string())?;
+async fn exec_list_files(arguments: &str) -> Result<String> {
+    let args: ListFilesArgs = serde_json::from_str(arguments)?;
 
     let mut entries = Vec::new();
     let mut dir = tokio::fs::read_dir(&args.path)
         .await
-        .map_err(|e| format!("reading {}: {e}", args.path))?;
+        .with_context(|| format!("reading {}", args.path))?;
 
-    while let Some(entry) = dir.next_entry().await.map_err(|e| e.to_string())? {
+    while let Some(entry) = dir.next_entry().await? {
         let name = entry.file_name().to_string_lossy().to_string();
         let is_dir = entry
             .file_type()
@@ -620,10 +621,412 @@ async fn exec_list_files(arguments: &str) -> Result<String, String> {
 }
 
 /// Simple shell escape for arguments
-fn shell_escape(s: &str) -> String {
+pub(crate) fn shell_escape(s: &str) -> String {
     if s.contains('\'') {
         format!("\"{}\"", s.replace('"', "\\\""))
     } else {
         format!("'{s}'")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- truncate_output ---
+
+    #[test]
+    fn test_truncate_output_short() {
+        let input = "hello world";
+        assert_eq!(truncate_output(input), input);
+    }
+
+    #[test]
+    fn test_truncate_output_many_lines() {
+        let lines: String = (0..2500).map(|i| format!("line {i}\n")).collect();
+        let result = truncate_output(&lines);
+        assert!(result.contains("Output truncated"));
+        assert!(result.contains("2000 lines shown"));
+    }
+
+    #[test]
+    fn test_truncate_output_large_bytes() {
+        // Create output under line limit but over byte limit
+        let line = "x".repeat(1000);
+        let lines: String = (0..100).map(|_| format!("{line}\n")).collect();
+        assert!(lines.len() > MAX_OUTPUT_BYTES);
+        let result = truncate_output(&lines);
+        assert!(result.contains("Output truncated"));
+        assert!(result.contains("bytes shown"));
+    }
+
+    #[test]
+    fn test_truncate_output_empty() {
+        assert_eq!(truncate_output(""), "");
+    }
+
+    // --- shell_escape ---
+
+    #[test]
+    fn test_shell_escape_simple() {
+        assert_eq!(shell_escape("hello"), "'hello'");
+    }
+
+    #[test]
+    fn test_shell_escape_with_single_quote() {
+        assert_eq!(shell_escape("it's"), "\"it's\"");
+    }
+
+    #[test]
+    fn test_shell_escape_with_spaces() {
+        assert_eq!(shell_escape("hello world"), "'hello world'");
+    }
+
+    #[test]
+    fn test_shell_escape_with_double_quote() {
+        // No single quotes, so wrapped in single quotes
+        assert_eq!(shell_escape(r#"say "hi""#), r#"'say "hi"'"#);
+    }
+
+    #[test]
+    fn test_shell_escape_with_both_quotes() {
+        // Has single quote, so wrapped in double quotes with escaped double quotes
+        let result = shell_escape(r#"it's "cool""#);
+        assert!(result.starts_with('"'));
+        assert!(result.contains(r#"\""#));
+    }
+
+    // --- get_tool_definitions ---
+
+    #[test]
+    fn test_tool_definitions_count() {
+        let defs = get_tool_definitions();
+        assert_eq!(defs.len(), 7);
+    }
+
+    #[test]
+    fn test_tool_definitions_names() {
+        let defs = get_tool_definitions();
+        let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
+        assert!(names.contains(&"read"));
+        assert!(names.contains(&"write"));
+        assert!(names.contains(&"edit"));
+        assert!(names.contains(&"bash"));
+        assert!(names.contains(&"glob"));
+        assert!(names.contains(&"grep"));
+        assert!(names.contains(&"list_files"));
+    }
+
+    #[test]
+    fn test_tool_definitions_all_have_descriptions() {
+        let defs = get_tool_definitions();
+        for def in &defs {
+            assert!(!def.function.description.is_empty(), "Tool {} has empty description", def.function.name);
+            assert_eq!(def.tool_type, "function");
+        }
+    }
+
+    #[test]
+    fn test_tool_definitions_parameters_are_objects() {
+        let defs = get_tool_definitions();
+        for def in &defs {
+            let params = &def.function.parameters;
+            assert_eq!(params["type"], "object", "Tool {} params not an object", def.function.name);
+            assert!(params["properties"].is_object(), "Tool {} has no properties", def.function.name);
+        }
+    }
+
+    // --- Permissions ---
+
+    #[test]
+    fn test_permissions_new_denies_by_default() {
+        let perms = Permissions::new();
+        assert!(!perms.is_allowed("bash:ls"));
+    }
+
+    #[test]
+    fn test_permissions_allow_always() {
+        let perms = Permissions::new();
+        perms.allow_always("bash:*");
+        assert!(perms.is_allowed("bash:ls"));
+        assert!(perms.is_allowed("bash:cargo build"));
+    }
+
+    #[test]
+    fn test_permissions_exact_match() {
+        let perms = Permissions::new();
+        perms.allow_always("bash:ls");
+        assert!(perms.is_allowed("bash:ls"));
+        assert!(!perms.is_allowed("bash:rm"));
+    }
+
+    #[test]
+    fn test_permissions_wildcard_doesnt_cross_tools() {
+        let perms = Permissions::new();
+        perms.allow_always("bash:*");
+        assert!(!perms.is_allowed("write:foo.txt"));
+    }
+
+    // --- Tool execution (integration-style) ---
+
+    #[tokio::test]
+    async fn test_exec_read_file() {
+        // Write a temp file, then read it
+        let dir = std::env::temp_dir().join("bfcode_test_read");
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("test.txt");
+        std::fs::write(&file, "line1\nline2\nline3\n").unwrap();
+
+        let args = format!(r#"{{"path": "{}"}}"#, file.display());
+        let result = exec_read(&args).await.unwrap();
+        assert!(result.contains("line1"));
+        assert!(result.contains("line2"));
+        assert!(result.contains("line3"));
+        // Check line numbers
+        assert!(result.contains("1\t"));
+        assert!(result.contains("2\t"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_exec_read_with_offset_limit() {
+        let dir = std::env::temp_dir().join("bfcode_test_read_offset");
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("test.txt");
+        let content: String = (1..=20).map(|i| format!("line{i}\n")).collect();
+        std::fs::write(&file, &content).unwrap();
+
+        let args = format!(r#"{{"path": "{}", "offset": 5, "limit": 3}}"#, file.display());
+        let result = exec_read(&args).await.unwrap();
+        assert!(result.contains("line5"));
+        assert!(result.contains("line6"));
+        assert!(result.contains("line7"));
+        assert!(!result.contains("line4"));
+        assert!(!result.contains("line8"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_exec_read_nonexistent() {
+        let args = r#"{"path": "/tmp/bfcode_nonexistent_file_xyz.txt"}"#;
+        let result = exec_read(args).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_exec_write_and_read_back() {
+        let dir = std::env::temp_dir().join("bfcode_test_write");
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("output.txt");
+
+        let args = format!(r#"{{"path": "{}", "content": "hello\nworld"}}"#, file.display());
+        let result = exec_write(&args).await.unwrap();
+        assert!(result.contains("Wrote"));
+        assert!(result.contains("2 lines"));
+
+        let written = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(written, "hello\nworld");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_exec_write_creates_parent_dirs() {
+        let dir = std::env::temp_dir().join("bfcode_test_write_nested");
+        let _ = std::fs::remove_dir_all(&dir);
+        let file = dir.join("a").join("b").join("c.txt");
+
+        let args = format!(r#"{{"path": "{}", "content": "deep"}}"#, file.display());
+        let result = exec_write(&args).await.unwrap();
+        assert!(result.contains("Wrote"));
+        assert!(file.exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_exec_edit_single_replace() {
+        let dir = std::env::temp_dir().join("bfcode_test_edit");
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("edit.txt");
+        std::fs::write(&file, "foo bar baz").unwrap();
+
+        let args = format!(
+            r#"{{"path": "{}", "old_string": "bar", "new_string": "qux"}}"#,
+            file.display()
+        );
+        let result = exec_edit(&args).await.unwrap();
+        assert!(result.contains("Edited"));
+        assert!(result.contains("1 occurrence"));
+
+        let content = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(content, "foo qux baz");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_exec_edit_replace_all() {
+        let dir = std::env::temp_dir().join("bfcode_test_edit_all");
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("edit.txt");
+        std::fs::write(&file, "aaa bbb aaa").unwrap();
+
+        let args = format!(
+            r#"{{"path": "{}", "old_string": "aaa", "new_string": "ccc", "replace_all": true}}"#,
+            file.display()
+        );
+        let result = exec_edit(&args).await.unwrap();
+        assert!(result.contains("2 occurrence"));
+
+        let content = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(content, "ccc bbb ccc");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_exec_edit_no_match() {
+        let dir = std::env::temp_dir().join("bfcode_test_edit_nomatch");
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("edit.txt");
+        std::fs::write(&file, "hello world").unwrap();
+
+        let args = format!(
+            r#"{{"path": "{}", "old_string": "xyz", "new_string": "abc"}}"#,
+            file.display()
+        );
+        let result = exec_edit(&args).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("not found"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_exec_edit_same_string_error() {
+        let dir = std::env::temp_dir().join("bfcode_test_edit_same");
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("edit.txt");
+        std::fs::write(&file, "hello").unwrap();
+
+        let args = format!(
+            r#"{{"path": "{}", "old_string": "hello", "new_string": "hello"}}"#,
+            file.display()
+        );
+        let result = exec_edit(&args).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must be different"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_exec_edit_multiple_matches_no_replace_all() {
+        let dir = std::env::temp_dir().join("bfcode_test_edit_multi");
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("edit.txt");
+        std::fs::write(&file, "aaa bbb aaa").unwrap();
+
+        let args = format!(
+            r#"{{"path": "{}", "old_string": "aaa", "new_string": "ccc"}}"#,
+            file.display()
+        );
+        let result = exec_edit(&args).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("2 matches"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_exec_bash_echo() {
+        let args = r#"{"command": "echo hello"}"#;
+        let result = exec_bash(args).await.unwrap();
+        assert!(result.contains("exit code: 0"));
+        assert!(result.contains("hello"));
+    }
+
+    #[tokio::test]
+    async fn test_exec_bash_nonzero_exit() {
+        let args = r#"{"command": "exit 42"}"#;
+        let result = exec_bash(args).await.unwrap();
+        assert!(result.contains("exit code: 42"));
+    }
+
+    #[tokio::test]
+    async fn test_exec_bash_stderr() {
+        let args = r#"{"command": "echo err >&2"}"#;
+        let result = exec_bash(args).await.unwrap();
+        assert!(result.contains("stderr:"));
+        assert!(result.contains("err"));
+    }
+
+    #[tokio::test]
+    async fn test_exec_bash_timeout() {
+        let args = r#"{"command": "sleep 10", "timeout": 1}"#;
+        let result = exec_bash(args).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("timed out"));
+    }
+
+    #[tokio::test]
+    async fn test_exec_list_files() {
+        let dir = std::env::temp_dir().join("bfcode_test_list");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("subdir")).unwrap();
+        std::fs::write(dir.join("a.txt"), "hello").unwrap();
+        std::fs::write(dir.join("b.rs"), "world").unwrap();
+
+        let args = format!(r#"{{"path": "{}"}}"#, dir.display());
+        let result = exec_list_files(&args).await.unwrap();
+        assert!(result.contains("a.txt"));
+        assert!(result.contains("b.rs"));
+        assert!(result.contains("subdir/"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_exec_grep_finds_pattern() {
+        let dir = std::env::temp_dir().join("bfcode_test_grep");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "hello world\nfoo bar\n").unwrap();
+        std::fs::write(dir.join("b.txt"), "no match here\n").unwrap();
+
+        let args = format!(r#"{{"pattern": "hello", "path": "{}"}}"#, dir.display());
+        let result = exec_grep(&args).await.unwrap();
+        assert!(result.contains("hello world"));
+        assert!(result.contains("a.txt"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_exec_grep_no_match() {
+        let dir = std::env::temp_dir().join("bfcode_test_grep_none");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "hello\n").unwrap();
+
+        let args = format!(r#"{{"pattern": "zzzzz", "path": "{}"}}"#, dir.display());
+        let result = exec_grep(&args).await.unwrap();
+        assert!(result.contains("No matches found"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- execute_tool unknown tool ---
+
+    #[tokio::test]
+    async fn test_execute_unknown_tool() {
+        let perms = Permissions::new();
+        let result = execute_tool("unknown_tool", "{}", &perms).await;
+        assert!(result.contains("Error"));
+        assert!(result.contains("Unknown tool"));
     }
 }

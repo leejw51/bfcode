@@ -252,3 +252,200 @@ pub struct GrepArgs {
 pub struct ListFilesArgs {
     pub path: String,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_message_system() {
+        let msg = Message::system("hello");
+        assert_eq!(msg.role, "system");
+        assert_eq!(msg.content.as_deref(), Some("hello"));
+        assert!(msg.tool_calls.is_none());
+        assert!(msg.tool_call_id.is_none());
+    }
+
+    #[test]
+    fn test_message_user() {
+        let msg = Message::user("test input");
+        assert_eq!(msg.role, "user");
+        assert_eq!(msg.content.as_deref(), Some("test input"));
+    }
+
+    #[test]
+    fn test_message_assistant_text() {
+        let msg = Message::assistant_text("response");
+        assert_eq!(msg.role, "assistant");
+        assert_eq!(msg.content.as_deref(), Some("response"));
+        assert!(msg.tool_calls.is_none());
+    }
+
+    #[test]
+    fn test_message_assistant_tool_calls() {
+        let tc = ToolCall {
+            id: "call_1".into(),
+            call_type: "function".into(),
+            function: FunctionCall {
+                name: "read".into(),
+                arguments: r#"{"path":"foo.txt"}"#.into(),
+            },
+        };
+        let msg = Message::assistant_tool_calls(vec![tc]);
+        assert_eq!(msg.role, "assistant");
+        assert!(msg.content.is_none());
+        assert_eq!(msg.tool_calls.as_ref().map(|v| v.len()), Some(1));
+    }
+
+    #[test]
+    fn test_message_tool_result() {
+        let msg = Message::tool_result("call_1", "file contents");
+        assert_eq!(msg.role, "tool");
+        assert_eq!(msg.content.as_deref(), Some("file contents"));
+        assert_eq!(msg.tool_call_id.as_deref(), Some("call_1"));
+    }
+
+    #[test]
+    fn test_message_serialization_skips_none() {
+        let msg = Message::user("hi");
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(!json.contains("tool_calls"));
+        assert!(!json.contains("tool_call_id"));
+    }
+
+    #[test]
+    fn test_message_roundtrip() {
+        let msg = Message::user("roundtrip test");
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: Message = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.role, "user");
+        assert_eq!(parsed.content.as_deref(), Some("roundtrip test"));
+    }
+
+    #[test]
+    fn test_global_config_default() {
+        let config = GlobalConfig::default();
+        assert_eq!(config.model, "grok-4-1-fast");
+        assert_eq!(config.temperature, 0.0);
+        assert!(!config.system_prompt.is_empty());
+        assert!(config.system_prompt.contains("bfcode"));
+    }
+
+    #[test]
+    fn test_global_config_serialization() {
+        let config = GlobalConfig::default();
+        let json = serde_json::to_string(&config).unwrap();
+        let parsed: GlobalConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.model, config.model);
+        assert_eq!(parsed.temperature, config.temperature);
+    }
+
+    #[test]
+    fn test_project_session_new() {
+        let session = ProjectSession::new();
+        assert!(!session.id.is_empty());
+        assert_eq!(session.title, "New session");
+        assert!(session.conversation.is_empty());
+        assert_eq!(session.total_tokens, 0);
+        assert!(!session.created_at.is_empty());
+        assert_eq!(session.created_at, session.updated_at);
+    }
+
+    #[test]
+    fn test_project_session_serialization() {
+        let mut session = ProjectSession::new();
+        session.conversation.push(Message::system("sys"));
+        session.conversation.push(Message::user("hello"));
+        session.total_tokens = 42;
+
+        let json = serde_json::to_string(&session).unwrap();
+        let parsed: ProjectSession = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.id, session.id);
+        assert_eq!(parsed.conversation.len(), 2);
+        assert_eq!(parsed.total_tokens, 42);
+    }
+
+    #[test]
+    fn test_chat_request_serialization() {
+        let req = ChatRequest {
+            model: "grok-4-1-fast".into(),
+            messages: vec![Message::user("hi")],
+            stream: false,
+            temperature: 0.0,
+            tools: None,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("grok-4-1-fast"));
+        assert!(!json.contains("tools")); // None should be skipped
+    }
+
+    #[test]
+    fn test_chat_response_deserialization() {
+        let json = r#"{
+            "choices": [{
+                "message": {"role": "assistant", "content": "Hello!"},
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15
+            }
+        }"#;
+        let resp: ChatResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.choices.len(), 1);
+        assert_eq!(resp.choices[0].message.content.as_deref(), Some("Hello!"));
+        assert_eq!(resp.usage.as_ref().map(|u| u.total_tokens), Some(15));
+    }
+
+    #[test]
+    fn test_chat_response_without_usage() {
+        let json = r#"{"choices": [{"message": {"role": "assistant", "content": "hi"}, "finish_reason": null}]}"#;
+        let resp: ChatResponse = serde_json::from_str(json).unwrap();
+        assert!(resp.usage.is_none());
+    }
+
+    #[test]
+    fn test_tool_call_deserialization() {
+        let json = r#"{
+            "id": "call_abc",
+            "type": "function",
+            "function": {"name": "bash", "arguments": "{\"command\": \"ls\"}"}
+        }"#;
+        let tc: ToolCall = serde_json::from_str(json).unwrap();
+        assert_eq!(tc.id, "call_abc");
+        assert_eq!(tc.call_type, "function");
+        assert_eq!(tc.function.name, "bash");
+    }
+
+    #[test]
+    fn test_read_args_minimal() {
+        let json = r#"{"path": "foo.rs"}"#;
+        let args: ReadArgs = serde_json::from_str(json).unwrap();
+        assert_eq!(args.path, "foo.rs");
+        assert!(args.offset.is_none());
+        assert!(args.limit.is_none());
+    }
+
+    #[test]
+    fn test_read_args_full() {
+        let json = r#"{"path": "foo.rs", "offset": 10, "limit": 50}"#;
+        let args: ReadArgs = serde_json::from_str(json).unwrap();
+        assert_eq!(args.offset, Some(10));
+        assert_eq!(args.limit, Some(50));
+    }
+
+    #[test]
+    fn test_edit_args() {
+        let json = r#"{"path": "f.rs", "old_string": "foo", "new_string": "bar", "replace_all": true}"#;
+        let args: EditArgs = serde_json::from_str(json).unwrap();
+        assert_eq!(args.replace_all, Some(true));
+    }
+
+    #[test]
+    fn test_instruction_files_not_empty() {
+        assert!(!INSTRUCTION_FILES.is_empty());
+        assert!(INSTRUCTION_FILES.contains(&"CLAUDE.md"));
+        assert!(INSTRUCTION_FILES.contains(&"BFCODE.md"));
+    }
+}

@@ -1,19 +1,23 @@
 use crate::types::{GlobalConfig, INSTRUCTION_FILES, ProjectSession};
+use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
 // --- Global config: ~/.bfcode/config.json ---
 
-fn global_dir() -> PathBuf {
-    let home = dirs::home_dir().expect("Could not determine home directory");
-    home.join(".bfcode")
+fn global_dir() -> Result<PathBuf> {
+    let home = dirs::home_dir().context("Could not determine home directory")?;
+    Ok(home.join(".bfcode"))
 }
 
-fn global_config_file() -> PathBuf {
-    global_dir().join("config.json")
+fn global_config_file() -> Result<PathBuf> {
+    Ok(global_dir()?.join("config.json"))
 }
 
 pub fn load_config() -> GlobalConfig {
-    let path = global_config_file();
+    let path = match global_config_file() {
+        Ok(p) => p,
+        Err(_) => return GlobalConfig::default(),
+    };
     if !path.exists() {
         return GlobalConfig::default();
     }
@@ -36,10 +40,10 @@ pub fn load_config() -> GlobalConfig {
     }
 }
 
-pub fn save_config(config: &GlobalConfig) -> Result<(), Box<dyn std::error::Error>> {
-    let dir = global_dir();
+pub fn save_config(config: &GlobalConfig) -> Result<()> {
+    let dir = global_dir()?;
     std::fs::create_dir_all(&dir)?;
-    atomic_write(&global_config_file(), config)
+    atomic_write(&global_config_file()?, config)
 }
 
 // --- Project sessions: .bfcode/sessions/{id}.json ---
@@ -78,7 +82,7 @@ pub fn load_session() -> ProjectSession {
     ProjectSession::new()
 }
 
-pub fn save_session(session: &ProjectSession) -> Result<(), Box<dyn std::error::Error>> {
+pub fn save_session(session: &ProjectSession) -> Result<()> {
     let dir = sessions_dir();
     std::fs::create_dir_all(&dir)?;
 
@@ -198,7 +202,7 @@ fn plans_dir() -> PathBuf {
 }
 
 /// Save a plan as a markdown file
-pub fn save_plan(name: &str, content: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+pub fn save_plan(name: &str, content: &str) -> Result<PathBuf> {
     let dir = plans_dir();
     std::fs::create_dir_all(&dir)?;
 
@@ -274,10 +278,7 @@ pub fn load_plans_context() -> Option<String> {
 
 // --- Helpers ---
 
-fn atomic_write<T: serde::Serialize>(
-    target: &PathBuf,
-    data: &T,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn atomic_write<T: serde::Serialize>(target: &PathBuf, data: &T) -> Result<()> {
     let json = serde_json::to_string_pretty(data)?;
     let tmp = target.with_extension("json.tmp");
     std::fs::write(&tmp, &json)?;
