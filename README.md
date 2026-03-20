@@ -1,4 +1,8 @@
-# bfcode
+<p align="center">
+  <img src="app.png" alt="bfcode" width="200">
+</p>
+
+<h1 align="center">bfcode</h1>
 
 A terminal-based AI coding assistant powered by Grok. Think Claude Code / opencode, but backed by the Grok API.
 
