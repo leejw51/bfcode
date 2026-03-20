@@ -1,3 +1,4 @@
 cli/test/
 .env
 opencode/
+.DS_Store

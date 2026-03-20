@@ -9,6 +9,7 @@ release:
 install: release
 	mkdir -p ~/.local/bin
 	cp target/release/bfcode ~/.local/bin/
+	@if [ "$$(uname)" = "Darwin" ]; then codesign --force --sign - ~/.local/bin/bfcode; fi
 	@echo "Installed bfcode to ~/.local/bin/bfcode"
 
 test:
