@@ -590,9 +590,20 @@ pub const SYSTEM_PROMPT: &str = r#"You are bfcode (back to the future code), a c
 - grep: Search file contents with regex pattern. Returns matching lines with line numbers.
 - list_files: List files and directories at a path.
 - webfetch: Fetch content from a URL. HTML is auto-stripped to plain text. Use to read docs, web pages, or API responses.
+- websearch: Search the web using a search API. Provide a query and optional num_results (default 5). Requires BRAVE_API_KEY or TAVILY_API_KEY env var.
 - memory_save: Save a context memory as a markdown file in .bfcode/memory/. Provide name (used as filename slug), description (one-line summary), memory_type (user|feedback|project|reference), and content (markdown body). Use this to remember important context across sessions.
 - memory_delete: Delete a context memory by name. Provide the name used when saving.
 - memory_list: List all saved context memories with their descriptions.
+- memory_search: Search memories semantically using TF-IDF. Provide query and optional top_k (default 5). Returns most relevant memories.
+- pdf_read: Read text content from a PDF file. Provide path and optional pages range (e.g. "1-5").
+- image_generate: Generate an image using DALL-E API. Provide prompt, optional size (default "1024x1024"), optional output_path. Requires OPENAI_API_KEY.
+- tts: Convert text to speech. Provide text, optional voice, optional output_path. Uses system TTS (say/espeak) or OpenAI TTS API with OPENAI_API_KEY.
+- browser_navigate: Navigate a headless browser to a URL and return page content as text.
+- browser_screenshot: Take a screenshot of the current browser page. Optional output_path.
+- browser_click: Click an element by CSS selector in the browser.
+- browser_type: Type text into a form element by CSS selector in the browser.
+- browser_evaluate: Evaluate JavaScript in the browser and return the result.
+- browser_close: Close the headless browser.
 
 # Guidelines
 1. Before modifying files, ALWAYS read them first to understand the current state.
@@ -605,7 +616,10 @@ pub const SYSTEM_PROMPT: &str = r#"You are bfcode (back to the future code), a c
 8. Keep responses concise but helpful.
 9. When asked to do something, use your tools to actually do it — don't just describe what to do.
 10. After writing or editing files, briefly confirm what changed.
-11. Do not add unnecessary comments, docstrings, or type annotations to code you didn't change."#;
+11. Do not add unnecessary comments, docstrings, or type annotations to code you didn't change.
+12. Use websearch to find current information from the web when needed.
+13. Use memory_search to find relevant context from saved memories.
+14. Use browser tools for interactive web automation tasks."#;
 
 /// Instruction file names to search for (like opencode's AGENTS.md / CLAUDE.md)
 pub const INSTRUCTION_FILES: &[&str] = &[
@@ -690,6 +704,72 @@ pub struct MemorySaveArgs {
 #[derive(Deserialize, Debug)]
 pub struct MemoryDeleteArgs {
     pub name: String,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct MemorySearchArgs {
+    pub query: String,
+    #[serde(default)]
+    pub top_k: Option<usize>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct WebSearchArgs {
+    pub query: String,
+    #[serde(default)]
+    pub num_results: Option<u32>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct PdfReadArgs {
+    pub path: String,
+    #[serde(default)]
+    pub pages: Option<String>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct ImageGenerateArgs {
+    pub prompt: String,
+    #[serde(default)]
+    pub size: Option<String>,
+    #[serde(default)]
+    pub output_path: Option<String>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct TtsArgs {
+    pub text: String,
+    #[serde(default)]
+    pub voice: Option<String>,
+    #[serde(default)]
+    pub output_path: Option<String>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct BrowserNavigateArgs {
+    pub url: String,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct BrowserScreenshotArgs {
+    #[serde(default)]
+    pub output_path: Option<String>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct BrowserClickArgs {
+    pub selector: String,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct BrowserTypeArgs {
+    pub selector: String,
+    pub text: String,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct BrowserEvaluateArgs {
+    pub script: String,
 }
 
 #[cfg(test)]

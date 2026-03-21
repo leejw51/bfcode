@@ -1,9 +1,15 @@
 mod api;
+mod browser;
 mod context;
+mod cron;
 mod persistence;
+mod plugin;
+mod search;
+mod skill;
 #[cfg(test)]
 mod test_utils;
 mod tools;
+mod tui;
 mod types;
 
 use anyhow::{Context, Result};
@@ -73,6 +79,14 @@ enum Commands {
         #[arg(default_value = "1")]
         count: usize,
     },
+
+    /// Manage skills (SKILL.md files in ~/.bfcode/skills/)
+    #[command(subcommand)]
+    Skills(SkillsCommands),
+
+    /// Manage cron jobs
+    #[command(subcommand)]
+    Cron(CronCommands),
 }
 
 #[derive(Subcommand)]
@@ -141,6 +155,53 @@ enum MemoryCommands {
 }
 
 #[derive(Subcommand)]
+enum SkillsCommands {
+    /// List all available skills
+    List,
+    /// Show a specific skill's content
+    Show {
+        /// Skill name
+        name: String,
+    },
+    /// Import skills from a folder or zip file
+    Import {
+        /// Path to a folder or .zip file containing SKILL.md files
+        path: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum CronCommands {
+    /// List all scheduled jobs
+    List,
+    /// Add a new cron job
+    Add {
+        /// Schedule interval (e.g., "5m", "1h", "30s", "daily")
+        schedule: String,
+        /// Shell command to run
+        command: String,
+        /// Description of the job
+        #[arg(short, long, default_value = "")]
+        description: String,
+    },
+    /// Remove a cron job by ID
+    Remove {
+        /// Job ID
+        id: String,
+    },
+    /// Enable a cron job
+    Enable {
+        /// Job ID
+        id: String,
+    },
+    /// Disable a cron job
+    Disable {
+        /// Job ID
+        id: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum ContextCommands {
     /// Generate environment context snapshot (.bfcode/context/environment.md)
     Env,
@@ -178,6 +239,8 @@ async fn main() -> Result<()> {
         Some(Commands::Context(cmd)) => run_context_command(cmd),
         Some(Commands::Memory(cmd)) => run_memory_command(cmd),
         Some(Commands::Undo { count }) => run_undo(count),
+        Some(Commands::Skills(cmd)) => run_skills_command(cmd),
+        Some(Commands::Cron(cmd)) => run_cron_command(cmd),
     }
 }
 
@@ -510,6 +573,120 @@ fn run_memory_command(cmd: MemoryCommands) -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn run_skills_command(cmd: SkillsCommands) -> Result<()> {
+    match cmd {
+        SkillsCommands::List => {
+            let skills = skill::load_skills();
+            if skills.is_empty() {
+                println!(
+                    "{}",
+                    "No skills found. Add SKILL.md files to ~/.bfcode/skills/ or use `bfcode skills import <path>`."
+                        .dimmed()
+                );
+            } else {
+                print!("{}", skill::format_skills_list(&skills));
+            }
+            Ok(())
+        }
+        SkillsCommands::Show { name } => {
+            let skills = skill::load_skills();
+            match skill::find_skill(&skills, &name) {
+                Some(s) => {
+                    println!("{} — {}", s.name.cyan().bold(), s.description.dimmed());
+                    if let Some(ref trigger) = s.trigger {
+                        println!("Trigger: {}", trigger.yellow());
+                    }
+                    println!("File: {}", s.path.display().to_string().dimmed());
+                    println!("---");
+                    println!("{}", s.content);
+                }
+                None => {
+                    println!("{}", format!("Skill '{name}' not found.").red());
+                }
+            }
+            Ok(())
+        }
+        SkillsCommands::Import { path } => {
+            let source = std::path::Path::new(&path);
+            match skill::import_skills(source) {
+                Ok(imported) => {
+                    if imported.is_empty() {
+                        println!(
+                            "{}",
+                            "No valid skill files found to import.".yellow()
+                        );
+                    } else {
+                        for name in &imported {
+                            println!("  {} {}", "Imported:".green(), name);
+                        }
+                        println!(
+                            "{}",
+                            format!("Imported {} skill(s) to ~/.bfcode/skills/", imported.len())
+                                .green()
+                        );
+                    }
+                }
+                Err(e) => {
+                    println!("{}", format!("Import failed: {e}").red());
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+fn run_cron_command(cmd: CronCommands) -> Result<()> {
+    let mut manager = cron::CronManager::load();
+    match cmd {
+        CronCommands::List => {
+            if manager.list_jobs().is_empty() {
+                println!(
+                    "{}",
+                    "No cron jobs scheduled. Use `bfcode cron add <schedule> <command>` to create one."
+                        .dimmed()
+                );
+            } else {
+                print!("{}", manager.format_jobs());
+            }
+        }
+        CronCommands::Add {
+            schedule,
+            command,
+            description,
+        } => {
+            let id = manager.add_job(&schedule, &command, &description)?;
+            println!("{}", format!("Cron job added: {id}").green());
+            println!(
+                "  Schedule: {}, Command: {}",
+                schedule.cyan(),
+                command.dimmed()
+            );
+        }
+        CronCommands::Remove { id } => {
+            if manager.remove_job(&id)? {
+                println!("{}", format!("Removed cron job: {id}").green());
+            } else {
+                println!("{}", format!("Cron job '{id}' not found.").yellow());
+            }
+        }
+        CronCommands::Enable { id } => {
+            if manager.set_enabled(&id, true)? {
+                println!("{}", format!("Enabled cron job: {id}").green());
+            } else {
+                println!("{}", format!("Cron job '{id}' not found.").yellow());
+            }
+        }
+        CronCommands::Disable { id } => {
+            if manager.set_enabled(&id, false)? {
+                println!("{}", format!("Disabled cron job: {id}").green());
+            } else {
+                println!("{}", format!("Cron job '{id}' not found.").yellow());
+            }
+        }
+    }
+    Ok(())
 }
 
 fn format_size(bytes: u64) -> String {
@@ -912,6 +1089,9 @@ fn handle_command(
             println!("  {}      - show compaction summary", "/context".yellow());
             println!("  {}     - undo last N file changes", "/undo [n]".yellow());
             println!("  {} - send clipboard image", "/paste [msg]".yellow());
+            println!("  {}       - list available skills", "/skills".yellow());
+            println!("  {} - activate a skill", "/skill <name>".yellow());
+            println!("  {}    - manage cron jobs", "/cron [cmd]".yellow());
             println!("  {}         - exit", "/quit".yellow());
             println!();
             println!("{}", "Image input:".yellow().bold());
@@ -929,6 +1109,8 @@ fn handle_command(
             println!("  {} - env/summary/save/list/show", "bfcode context ...".yellow());
             println!("  {}       - show configuration", "bfcode config".yellow());
             println!("  {}    - undo file changes", "bfcode undo [n]".yellow());
+            println!("  {} - list/show/import skills", "bfcode skills ...".yellow());
+            println!("  {} - list/add/remove cron jobs", "bfcode cron ...".yellow());
         }
         "/clear" => {
             persistence::clear_session(session);
@@ -1093,6 +1275,86 @@ fn handle_command(
                 for (name, path) in &plans {
                     println!("  {} {}", name.cyan(), path.dimmed());
                 }
+            }
+        }
+        "/skills" => {
+            let skills = skill::load_skills();
+            if skills.is_empty() {
+                println!(
+                    "{}",
+                    "No skills found. Add SKILL.md files to ~/.bfcode/skills/".dimmed()
+                );
+            } else {
+                print!("{}", skill::format_skills_list(&skills));
+            }
+        }
+        "/skill" => {
+            if arg.is_empty() {
+                println!("{}", "Usage: /skill <name>".yellow());
+            } else {
+                let skills = skill::load_skills();
+                match skill::find_skill(&skills, arg) {
+                    Some(s) => {
+                        // Inject skill content into system prompt
+                        let skill_prompt = format!(
+                            "\n\n# Skill: {}\n{}\n",
+                            s.name, s.content
+                        );
+                        if let Some(sys_msg) = session.conversation.first_mut() {
+                            if sys_msg.role == "system" {
+                                if let Some(ref mut content) = sys_msg.content {
+                                    content.push_str(&skill_prompt);
+                                }
+                            }
+                        }
+                        println!(
+                            "{} Skill '{}' activated and injected into context.",
+                            "✓".green(),
+                            s.name.cyan()
+                        );
+                    }
+                    None => {
+                        println!("{}", format!("Skill '{}' not found. Use /skills to list.", arg).red());
+                    }
+                }
+            }
+        }
+        "/cron" => {
+            if arg.is_empty() || arg == "list" {
+                let manager = cron::CronManager::load();
+                if manager.list_jobs().is_empty() {
+                    println!(
+                        "{}",
+                        "No cron jobs. Use: /cron add <schedule> <command>".dimmed()
+                    );
+                } else {
+                    print!("{}", manager.format_jobs());
+                }
+            } else if arg.starts_with("add ") {
+                let rest = arg.strip_prefix("add ").unwrap_or("").trim();
+                let parts: Vec<&str> = rest.splitn(2, ' ').collect();
+                if parts.len() < 2 {
+                    println!("{}", "Usage: /cron add <schedule> <command>".yellow());
+                } else {
+                    let mut manager = cron::CronManager::load();
+                    match manager.add_job(parts[0], parts[1], "") {
+                        Ok(id) => println!(
+                            "{}",
+                            format!("Cron job added: {} (every {}, cmd: {})", id, parts[0], parts[1]).green()
+                        ),
+                        Err(e) => println!("{}", format!("Failed: {e}").red()),
+                    }
+                }
+            } else if arg.starts_with("remove ") || arg.starts_with("rm ") {
+                let id = arg.split_whitespace().nth(1).unwrap_or("");
+                let mut manager = cron::CronManager::load();
+                match manager.remove_job(id) {
+                    Ok(true) => println!("{}", format!("Removed: {id}").green()),
+                    Ok(false) => println!("{}", format!("Job '{id}' not found.").yellow()),
+                    Err(e) => println!("{}", format!("Failed: {e}").red()),
+                }
+            } else {
+                println!("{}", "Usage: /cron [list|add <schedule> <cmd>|remove <id>]".yellow());
             }
         }
         _ => {

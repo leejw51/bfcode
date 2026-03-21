@@ -192,6 +192,164 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                 }),
             },
         },
+        ToolDefinition {
+            tool_type: "function".into(),
+            function: FunctionSchema {
+                name: "memory_search".into(),
+                description: "Search saved memories semantically using TF-IDF. Returns the most relevant memories matching the query.".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Search query"},
+                        "top_k": {"type": "integer", "description": "Number of results to return. Default 5."}
+                    },
+                    "required": ["query"]
+                }),
+            },
+        },
+        ToolDefinition {
+            tool_type: "function".into(),
+            function: FunctionSchema {
+                name: "websearch".into(),
+                description: "Search the web using Brave Search or Tavily API. Returns titles, URLs, and snippets.".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Search query"},
+                        "num_results": {"type": "integer", "description": "Number of results to return. Default 5."}
+                    },
+                    "required": ["query"]
+                }),
+            },
+        },
+        ToolDefinition {
+            tool_type: "function".into(),
+            function: FunctionSchema {
+                name: "pdf_read".into(),
+                description: "Extract text content from a PDF file. Returns text with page markers.".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Path to the PDF file"},
+                        "pages": {"type": "string", "description": "Page range to read (e.g. \"1-5\", \"3\", \"10-20\"). Optional, defaults to all pages."}
+                    },
+                    "required": ["path"]
+                }),
+            },
+        },
+        ToolDefinition {
+            tool_type: "function".into(),
+            function: FunctionSchema {
+                name: "image_generate".into(),
+                description: "Generate an image using DALL-E API. Saves the image locally and returns the file path.".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "prompt": {"type": "string", "description": "Image generation prompt describing what to create"},
+                        "size": {"type": "string", "description": "Image size: \"1024x1024\", \"1792x1024\", \"1024x1792\". Default \"1024x1024\"."},
+                        "output_path": {"type": "string", "description": "Path to save the image. Default: .bfcode/generated/<timestamp>.png"}
+                    },
+                    "required": ["prompt"]
+                }),
+            },
+        },
+        ToolDefinition {
+            tool_type: "function".into(),
+            function: FunctionSchema {
+                name: "tts".into(),
+                description: "Convert text to speech audio. Uses system TTS (say/espeak) or OpenAI TTS API.".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "string", "description": "Text to convert to speech"},
+                        "voice": {"type": "string", "description": "Voice name. For system: macOS voice names. For API: alloy, echo, fable, onyx, nova, shimmer."},
+                        "output_path": {"type": "string", "description": "Path to save audio file. If provided, saves to file instead of playing."}
+                    },
+                    "required": ["text"]
+                }),
+            },
+        },
+        ToolDefinition {
+            tool_type: "function".into(),
+            function: FunctionSchema {
+                name: "browser_navigate".into(),
+                description: "Navigate a headless browser to a URL and return page content as text. Requires Chrome/Chromium installed.".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "url": {"type": "string", "description": "URL to navigate to"}
+                    },
+                    "required": ["url"]
+                }),
+            },
+        },
+        ToolDefinition {
+            tool_type: "function".into(),
+            function: FunctionSchema {
+                name: "browser_screenshot".into(),
+                description: "Take a screenshot of the current browser page.".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "output_path": {"type": "string", "description": "Path to save the screenshot PNG. Default: auto-generated."}
+                    }
+                }),
+            },
+        },
+        ToolDefinition {
+            tool_type: "function".into(),
+            function: FunctionSchema {
+                name: "browser_click".into(),
+                description: "Click an element by CSS selector in the headless browser.".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "selector": {"type": "string", "description": "CSS selector of the element to click"}
+                    },
+                    "required": ["selector"]
+                }),
+            },
+        },
+        ToolDefinition {
+            tool_type: "function".into(),
+            function: FunctionSchema {
+                name: "browser_type".into(),
+                description: "Type text into a form element by CSS selector in the headless browser.".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "selector": {"type": "string", "description": "CSS selector of the input element"},
+                        "text": {"type": "string", "description": "Text to type into the element"}
+                    },
+                    "required": ["selector", "text"]
+                }),
+            },
+        },
+        ToolDefinition {
+            tool_type: "function".into(),
+            function: FunctionSchema {
+                name: "browser_evaluate".into(),
+                description: "Evaluate JavaScript in the headless browser and return the result.".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "script": {"type": "string", "description": "JavaScript code to evaluate"}
+                    },
+                    "required": ["script"]
+                }),
+            },
+        },
+        ToolDefinition {
+            tool_type: "function".into(),
+            function: FunctionSchema {
+                name: "browser_close".into(),
+                description: "Close the headless browser and free resources.".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+            },
+        },
     ]
 }
 
@@ -281,7 +439,7 @@ pub async fn execute_tool(
     }
 
     // Check permissions for dangerous tools
-    let needs_permission = matches!(name, "bash" | "write" | "edit" | "apply_patch" | "memory_save" | "memory_delete");
+    let needs_permission = matches!(name, "bash" | "write" | "edit" | "apply_patch" | "memory_save" | "memory_delete" | "browser_navigate" | "browser_click" | "browser_type" | "browser_evaluate" | "image_generate" | "tts");
     if needs_permission {
         let summary = tool_permission_summary(name, arguments);
         match permissions.ask_permission(name, &summary) {
@@ -304,9 +462,20 @@ pub async fn execute_tool(
         "list_files" => exec_list_files(arguments).await,
         "apply_patch" => exec_apply_patch(arguments, session_id).await,
         "webfetch" => exec_webfetch(arguments).await,
+        "websearch" => exec_websearch(arguments).await,
         "memory_save" => exec_memory_save(arguments).await,
         "memory_delete" => exec_memory_delete(arguments).await,
         "memory_list" => exec_memory_list().await,
+        "memory_search" => exec_memory_search(arguments).await,
+        "pdf_read" => exec_pdf_read(arguments).await,
+        "image_generate" => exec_image_generate(arguments).await,
+        "tts" => exec_tts(arguments).await,
+        "browser_navigate" => exec_browser_navigate(arguments).await,
+        "browser_screenshot" => exec_browser_screenshot(arguments).await,
+        "browser_click" => exec_browser_click(arguments).await,
+        "browser_type" => exec_browser_type(arguments).await,
+        "browser_evaluate" => exec_browser_evaluate(arguments).await,
+        "browser_close" => exec_browser_close().await,
         _ => Err(anyhow::anyhow!("Unknown tool: {name}")),
     };
 
@@ -384,6 +553,42 @@ pub fn print_tool_call(name: &str, arguments: &str) {
                 format!("{name} -> {folder}")
             }
             "memory_delete" => v["name"].as_str().unwrap_or("").to_string(),
+            "memory_search" => {
+                let query = v["query"].as_str().unwrap_or("");
+                format!("\"{query}\"")
+            }
+            "websearch" => {
+                let query = v["query"].as_str().unwrap_or("");
+                format!("\"{query}\"")
+            }
+            "pdf_read" => {
+                let path = v["path"].as_str().unwrap_or("");
+                let pages = v["pages"].as_str().unwrap_or("all");
+                format!("{path} (pages: {pages})")
+            }
+            "image_generate" => {
+                let prompt = v["prompt"].as_str().unwrap_or("");
+                let short: String = prompt.chars().take(60).collect();
+                format!("\"{short}...\"")
+            }
+            "tts" => {
+                let text = v["text"].as_str().unwrap_or("");
+                let short: String = text.chars().take(50).collect();
+                format!("\"{short}...\"")
+            }
+            "browser_navigate" => v["url"].as_str().unwrap_or("").to_string(),
+            "browser_screenshot" => v["output_path"].as_str().unwrap_or("auto").to_string(),
+            "browser_click" => v["selector"].as_str().unwrap_or("").to_string(),
+            "browser_type" => {
+                let sel = v["selector"].as_str().unwrap_or("");
+                format!("{sel}")
+            }
+            "browser_evaluate" => {
+                let script = v["script"].as_str().unwrap_or("");
+                let short: String = script.chars().take(60).collect();
+                format!("{short}...")
+            }
+            "browser_close" => "closing browser".to_string(),
             _ => arguments.to_string(),
         },
         Err(_) => arguments.to_string(),
@@ -1221,6 +1426,386 @@ fn apply_hunks(content: &str, hunks: &[Hunk]) -> Result<String> {
     Ok(result)
 }
 
+// --- Web Search Tool ---
+
+async fn exec_websearch(arguments: &str) -> Result<String> {
+    let args: WebSearchArgs = serde_json::from_str(arguments)?;
+    let num_results = args.num_results.unwrap_or(5);
+
+    // Try Brave Search first, then Tavily
+    if let Ok(api_key) = std::env::var("BRAVE_API_KEY") {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .build()?;
+
+        let resp = client
+            .get("https://api.search.brave.com/res/v1/web/search")
+            .header("Accept", "application/json")
+            .header("Accept-Encoding", "gzip")
+            .header("X-Subscription-Token", &api_key)
+            .query(&[("q", &args.query), ("count", &num_results.to_string())])
+            .send()
+            .await
+            .context("Brave Search API request failed")?;
+
+        let body: serde_json::Value = resp.json().await?;
+        let mut output = format!("Web search results for: \"{}\"\n\n", args.query);
+
+        if let Some(results) = body["web"]["results"].as_array() {
+            for (i, result) in results.iter().enumerate() {
+                let title = result["title"].as_str().unwrap_or("Untitled");
+                let url = result["url"].as_str().unwrap_or("");
+                let desc = result["description"].as_str().unwrap_or("");
+                output.push_str(&format!("{}. {}\n   {}\n   {}\n\n", i + 1, title, url, desc));
+            }
+            if results.is_empty() {
+                output.push_str("No results found.\n");
+            }
+        } else {
+            output.push_str("No results found.\n");
+        }
+        return Ok(output);
+    }
+
+    if let Ok(api_key) = std::env::var("TAVILY_API_KEY") {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .build()?;
+
+        let body = serde_json::json!({
+            "api_key": api_key,
+            "query": args.query,
+            "max_results": num_results,
+            "include_answer": true,
+        });
+
+        let resp = client
+            .post("https://api.tavily.com/search")
+            .json(&body)
+            .send()
+            .await
+            .context("Tavily API request failed")?;
+
+        let result: serde_json::Value = resp.json().await?;
+        let mut output = format!("Web search results for: \"{}\"\n\n", args.query);
+
+        if let Some(answer) = result["answer"].as_str() {
+            if !answer.is_empty() {
+                output.push_str(&format!("Summary: {}\n\n", answer));
+            }
+        }
+
+        if let Some(results) = result["results"].as_array() {
+            for (i, r) in results.iter().enumerate() {
+                let title = r["title"].as_str().unwrap_or("Untitled");
+                let url = r["url"].as_str().unwrap_or("");
+                let content = r["content"].as_str().unwrap_or("");
+                let snippet: String = content.chars().take(200).collect();
+                output.push_str(&format!("{}. {}\n   {}\n   {}\n\n", i + 1, title, url, snippet));
+            }
+        }
+        return Ok(output);
+    }
+
+    bail!("No search API key found. Set BRAVE_API_KEY or TAVILY_API_KEY environment variable.")
+}
+
+// --- Memory Search Tool ---
+
+async fn exec_memory_search(arguments: &str) -> Result<String> {
+    let args: MemorySearchArgs = serde_json::from_str(arguments)?;
+    let top_k = args.top_k.unwrap_or(5);
+
+    let memories = crate::persistence::list_memories();
+    if memories.is_empty() {
+        return Ok("No memories saved to search.".to_string());
+    }
+
+    // Load all memory contents
+    let mut docs = Vec::new();
+    for (name, desc, _, _) in &memories {
+        if let Some(mem) = crate::persistence::load_memory(name) {
+            docs.push((name.clone(), format!("{}\n{}\n{}", name, desc, mem.content)));
+        }
+    }
+
+    let index = crate::search::TfidfIndex::build(docs);
+    let results = index.search(&args.query, top_k);
+
+    if results.is_empty() {
+        return Ok(format!("No relevant memories found for: \"{}\"", args.query));
+    }
+
+    let mut output = format!("Memory search results for: \"{}\"\n\n", args.query);
+    for (i, r) in results.iter().enumerate() {
+        output.push_str(&format!(
+            "{}. {} (score: {:.3})\n   {}\n\n",
+            i + 1,
+            r.name,
+            r.score,
+            r.snippet
+        ));
+    }
+    Ok(output)
+}
+
+// --- PDF Read Tool ---
+
+async fn exec_pdf_read(arguments: &str) -> Result<String> {
+    let args: PdfReadArgs = serde_json::from_str(arguments)?;
+
+    let bytes = tokio::fs::read(&args.path)
+        .await
+        .with_context(|| format!("reading PDF {}", args.path))?;
+
+    let text = pdf_extract::extract_text_from_mem(&bytes)
+        .with_context(|| format!("extracting text from PDF {}", args.path))?;
+
+    // If pages specified, filter
+    if let Some(ref pages_str) = args.pages {
+        let pages: Vec<&str> = text.split('\u{0c}').collect(); // form feed = page break
+        let total_pages = pages.len();
+        let (start, end) = parse_page_range(pages_str, total_pages)?;
+
+        let mut output = String::new();
+        for i in start..=end.min(total_pages - 1) {
+            output.push_str(&format!("--- Page {} ---\n", i + 1));
+            output.push_str(pages.get(i).unwrap_or(&""));
+            output.push('\n');
+        }
+        output.push_str(&format!("\nShowing pages {}-{} of {}", start + 1, end.min(total_pages - 1) + 1, total_pages));
+        Ok(output)
+    } else {
+        let pages: Vec<&str> = text.split('\u{0c}').collect();
+        let mut output = String::new();
+        for (i, page) in pages.iter().enumerate() {
+            if !page.trim().is_empty() {
+                output.push_str(&format!("--- Page {} ---\n", i + 1));
+                output.push_str(page);
+                output.push('\n');
+            }
+        }
+        Ok(output)
+    }
+}
+
+fn parse_page_range(s: &str, total: usize) -> Result<(usize, usize)> {
+    if let Some((start_s, end_s)) = s.split_once('-') {
+        let start: usize = start_s.trim().parse::<usize>()?.saturating_sub(1);
+        let end: usize = end_s.trim().parse::<usize>()?.saturating_sub(1);
+        Ok((start.min(total - 1), end.min(total - 1)))
+    } else {
+        let page: usize = s.trim().parse::<usize>()?.saturating_sub(1);
+        Ok((page.min(total - 1), page.min(total - 1)))
+    }
+}
+
+// --- Image Generation Tool ---
+
+async fn exec_image_generate(arguments: &str) -> Result<String> {
+    let args: ImageGenerateArgs = serde_json::from_str(arguments)?;
+
+    let api_key = std::env::var("OPENAI_API_KEY")
+        .context("OPENAI_API_KEY environment variable not set. Required for image generation.")?;
+
+    let size = args.size.as_deref().unwrap_or("1024x1024");
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()?;
+
+    let body = serde_json::json!({
+        "model": "dall-e-3",
+        "prompt": args.prompt,
+        "n": 1,
+        "size": size,
+        "response_format": "b64_json"
+    });
+
+    let resp = client
+        .post("https://api.openai.com/v1/images/generations")
+        .header("Authorization", format!("Bearer {api_key}"))
+        .json(&body)
+        .send()
+        .await
+        .context("DALL-E API request failed")?;
+
+    let status = resp.status();
+    let result: serde_json::Value = resp.json().await?;
+
+    if !status.is_success() {
+        let err_msg = result["error"]["message"].as_str().unwrap_or("Unknown error");
+        bail!("DALL-E API error: {err_msg}");
+    }
+
+    let b64_data = result["data"][0]["b64_json"]
+        .as_str()
+        .context("No image data in response")?;
+
+    let image_bytes = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        b64_data,
+    )?;
+
+    let output_path = match args.output_path {
+        Some(p) => p,
+        None => {
+            let dir = ".bfcode/generated";
+            tokio::fs::create_dir_all(dir).await?;
+            let ts = chrono::Local::now().format("%Y%m%d_%H%M%S");
+            format!("{dir}/{ts}.png")
+        }
+    };
+
+    tokio::fs::write(&output_path, &image_bytes).await
+        .with_context(|| format!("writing image to {output_path}"))?;
+
+    let revised_prompt = result["data"][0]["revised_prompt"]
+        .as_str()
+        .unwrap_or(&args.prompt);
+
+    Ok(format!(
+        "Image generated and saved to: {output_path}\nSize: {size}\nPrompt: {revised_prompt}"
+    ))
+}
+
+// --- TTS Tool ---
+
+async fn exec_tts(arguments: &str) -> Result<String> {
+    let args: TtsArgs = serde_json::from_str(arguments)?;
+
+    // If output_path is provided or OPENAI_API_KEY is set, try API first
+    if let Ok(api_key) = std::env::var("OPENAI_API_KEY") {
+        if args.output_path.is_some() || args.voice.as_deref().map(|v| matches!(v, "alloy" | "echo" | "fable" | "onyx" | "nova" | "shimmer")).unwrap_or(false) {
+            let voice = args.voice.as_deref().unwrap_or("alloy");
+            let client = reqwest::Client::builder()
+                .timeout(Duration::from_secs(60))
+                .build()?;
+
+            let body = serde_json::json!({
+                "model": "tts-1",
+                "input": args.text,
+                "voice": voice,
+            });
+
+            let resp = client
+                .post("https://api.openai.com/v1/audio/speech")
+                .header("Authorization", format!("Bearer {api_key}"))
+                .json(&body)
+                .send()
+                .await
+                .context("OpenAI TTS API request failed")?;
+
+            if !resp.status().is_success() {
+                let err = resp.text().await.unwrap_or_default();
+                bail!("TTS API error: {err}");
+            }
+
+            let audio_bytes = resp.bytes().await?;
+            let output_path = args.output_path.unwrap_or_else(|| {
+                let ts = chrono::Local::now().format("%Y%m%d_%H%M%S");
+                format!(".bfcode/generated/{ts}.mp3")
+            });
+
+            if let Some(parent) = std::path::Path::new(&output_path).parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+            tokio::fs::write(&output_path, &audio_bytes).await?;
+
+            return Ok(format!("Audio saved to: {output_path} ({} bytes, voice: {voice})", audio_bytes.len()));
+        }
+    }
+
+    // Fall back to system TTS
+    let voice_arg = args.voice.as_deref().unwrap_or("");
+
+    if cfg!(target_os = "macos") {
+        let mut cmd = vec!["say".to_string()];
+        if !voice_arg.is_empty() {
+            cmd.push("-v".into());
+            cmd.push(voice_arg.into());
+        }
+        if let Some(ref path) = args.output_path {
+            cmd.push("-o".into());
+            cmd.push(path.clone());
+        }
+        cmd.push(args.text.clone());
+
+        let result = tokio::process::Command::new(&cmd[0])
+            .args(&cmd[1..])
+            .output()
+            .await
+            .context("Failed to run 'say' command")?;
+
+        if result.status.success() {
+            if let Some(ref path) = args.output_path {
+                Ok(format!("Speech saved to: {path}"))
+            } else {
+                Ok("Text spoken via system TTS.".to_string())
+            }
+        } else {
+            let stderr = String::from_utf8_lossy(&result.stderr);
+            bail!("TTS failed: {stderr}");
+        }
+    } else {
+        // Linux: try espeak
+        let mut cmd = vec!["espeak".to_string()];
+        if let Some(ref path) = args.output_path {
+            cmd.push("-w".into());
+            cmd.push(path.clone());
+        }
+        cmd.push(args.text.clone());
+
+        let result = tokio::process::Command::new(&cmd[0])
+            .args(&cmd[1..])
+            .output()
+            .await
+            .context("Failed to run 'espeak'. Install it with: sudo apt install espeak")?;
+
+        if result.status.success() {
+            if let Some(ref path) = args.output_path {
+                Ok(format!("Speech saved to: {path}"))
+            } else {
+                Ok("Text spoken via espeak.".to_string())
+            }
+        } else {
+            let stderr = String::from_utf8_lossy(&result.stderr);
+            bail!("TTS failed: {stderr}");
+        }
+    }
+}
+
+// --- Browser Tools ---
+
+async fn exec_browser_navigate(arguments: &str) -> Result<String> {
+    let args: BrowserNavigateArgs = serde_json::from_str(arguments)?;
+    crate::browser::browser_navigate(&args.url).await
+}
+
+async fn exec_browser_screenshot(arguments: &str) -> Result<String> {
+    let args: BrowserScreenshotArgs = serde_json::from_str(arguments)?;
+    crate::browser::browser_screenshot(args.output_path.as_deref()).await
+}
+
+async fn exec_browser_click(arguments: &str) -> Result<String> {
+    let args: BrowserClickArgs = serde_json::from_str(arguments)?;
+    crate::browser::browser_click(&args.selector).await
+}
+
+async fn exec_browser_type(arguments: &str) -> Result<String> {
+    let args: BrowserTypeArgs = serde_json::from_str(arguments)?;
+    crate::browser::browser_type(&args.selector, &args.text).await
+}
+
+async fn exec_browser_evaluate(arguments: &str) -> Result<String> {
+    let args: BrowserEvaluateArgs = serde_json::from_str(arguments)?;
+    crate::browser::browser_evaluate(&args.script).await
+}
+
+async fn exec_browser_close() -> Result<String> {
+    crate::browser::browser_close().await
+}
+
 /// Simple shell escape for arguments
 pub(crate) fn shell_escape(s: &str) -> String {
     if s.contains('\'') {
@@ -1302,7 +1887,7 @@ mod tests {
     #[test]
     fn test_tool_definitions_count() {
         let defs = get_tool_definitions();
-        assert_eq!(defs.len(), 12);
+        assert_eq!(defs.len(), 23);
     }
 
     #[test]
