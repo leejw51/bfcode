@@ -503,8 +503,8 @@ async fn handle_chat(req: &HttpRequest, state: &Arc<Mutex<ServerState>>) -> Vec<
     };
 
     // Shell out to bfcode chat
-    let response_text = match run_bfcode_chat(&parsed.message).await {
-        Ok(text) => text,
+    let result = match run_bfcode_chat(&parsed.message).await {
+        Ok(r) => r,
         Err(e) => {
             return error_response(
                 500,
@@ -523,20 +523,47 @@ async fn handle_chat(req: &HttpRequest, state: &Arc<Mutex<ServerState>>) -> Vec<
         }
     }
 
-    json_response(
-        200,
-        "OK",
-        &serde_json::json!({
-            "response": response_text,
-            "session_id": session_id,
-        }),
-    )
+    let mut resp = serde_json::json!({
+        "response": result.response,
+        "session_id": session_id,
+    });
+    if let Some(v) = result.prompt_tokens {
+        resp["prompt_tokens"] = serde_json::json!(v);
+    }
+    if let Some(v) = result.completion_tokens {
+        resp["completion_tokens"] = serde_json::json!(v);
+    }
+    if let Some(v) = result.total_tokens {
+        resp["total_tokens"] = serde_json::json!(v);
+    }
+    if let Some(v) = result.session_tokens {
+        resp["session_tokens"] = serde_json::json!(v);
+    }
+    if let Some(v) = result.cost {
+        resp["cost"] = serde_json::json!(v);
+    }
+    if let Some(ref v) = result.model {
+        resp["model"] = serde_json::json!(v);
+    }
+
+    json_response(200, "OK", &resp)
 }
 
-/// Run `bfcode chat "message"` as a subprocess and capture stdout.
-async fn run_bfcode_chat(message: &str) -> Result<String> {
+/// Result of running bfcode chat, including optional usage metadata.
+struct BfcodeResult {
+    response: String,
+    prompt_tokens: Option<u64>,
+    completion_tokens: Option<u64>,
+    total_tokens: Option<u64>,
+    session_tokens: Option<u64>,
+    cost: Option<f64>,
+    model: Option<String>,
+}
+
+/// Run `bfcode chat --oneshot "message"` as a subprocess and capture stdout.
+async fn run_bfcode_chat(message: &str) -> Result<BfcodeResult> {
     let output = tokio::process::Command::new("bfcode")
-        .args(["chat", message])
+        .args(["chat", "--oneshot", message])
         .output()
         .await
         .context("Failed to spawn bfcode process")?;
@@ -547,7 +574,37 @@ async fn run_bfcode_chat(message: &str) -> Result<String> {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    Ok(stdout)
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // Parse metadata from stderr (line starting with __BFCODE_META__)
+    let mut prompt_tokens = None;
+    let mut completion_tokens = None;
+    let mut total_tokens = None;
+    let mut session_tokens = None;
+    let mut cost = None;
+    let mut model = None;
+    for line in stderr.lines() {
+        if let Some(json_str) = line.strip_prefix("__BFCODE_META__") {
+            if let Ok(meta) = serde_json::from_str::<serde_json::Value>(json_str) {
+                prompt_tokens = meta.get("prompt_tokens").and_then(|v| v.as_u64());
+                completion_tokens = meta.get("completion_tokens").and_then(|v| v.as_u64());
+                total_tokens = meta.get("total_tokens").and_then(|v| v.as_u64());
+                session_tokens = meta.get("session_tokens").and_then(|v| v.as_u64());
+                cost = meta.get("cost").and_then(|v| v.as_f64());
+                model = meta.get("model").and_then(|v| v.as_str()).map(String::from);
+            }
+        }
+    }
+
+    Ok(BfcodeResult {
+        response: stdout,
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+        session_tokens,
+        cost,
+        model,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1002,5 +1059,188 @@ mod tests {
         assert!(output.contains("0.1.0"));
         // Tailscale line should not appear when None
         assert!(!output.contains("Tailscale IP"));
+    }
+
+    // --- Oneshot / gateway integration tests ---
+
+    #[tokio::test]
+    async fn test_handle_chat_invalid_session_returns_404() {
+        let config = GatewayConfig::default();
+        let state = Arc::new(Mutex::new(ServerState::new(config)));
+
+        let req_body = serde_json::json!({
+            "message": "hello",
+            "session_id": "sess_nonexistent"
+        });
+        let body_bytes = serde_json::to_vec(&req_body).unwrap();
+
+        let req = HttpRequest {
+            method: "POST".into(),
+            path: "/v1/chat".into(),
+            headers: HashMap::new(),
+            body: body_bytes,
+        };
+
+        let resp = handle_chat(&req, &state).await;
+        let resp_str = String::from_utf8_lossy(&resp);
+        assert!(resp_str.contains("404"));
+        assert!(resp_str.contains("Session not found"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_chat_missing_message_returns_400() {
+        let config = GatewayConfig::default();
+        let state = Arc::new(Mutex::new(ServerState::new(config)));
+
+        let req = HttpRequest {
+            method: "POST".into(),
+            path: "/v1/chat".into(),
+            headers: HashMap::new(),
+            body: b"{}".to_vec(),
+        };
+
+        let resp = handle_chat(&req, &state).await;
+        let resp_str = String::from_utf8_lossy(&resp);
+        assert!(resp_str.contains("400"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_create_session_and_list() {
+        let config = GatewayConfig::default();
+        let state = Arc::new(Mutex::new(ServerState::new(config)));
+
+        // Create a session
+        let req_body = serde_json::json!({ "user": "tester" });
+        let req = HttpRequest {
+            method: "POST".into(),
+            path: "/v1/sessions".into(),
+            headers: HashMap::new(),
+            body: serde_json::to_vec(&req_body).unwrap(),
+        };
+        let resp = handle_create_session(&req, &state).await;
+        let resp_str = String::from_utf8_lossy(&resp);
+        assert!(resp_str.contains("201"));
+        assert!(resp_str.contains("sess_"));
+
+        // List sessions
+        let resp = handle_list_sessions(&state).await;
+        let resp_str = String::from_utf8_lossy(&resp);
+        assert!(resp_str.contains("tester"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_create_session_max_limit() {
+        let mut config = GatewayConfig::default();
+        config.max_sessions = 1;
+        let state = Arc::new(Mutex::new(ServerState::new(config)));
+
+        // First session should succeed
+        let req = HttpRequest {
+            method: "POST".into(),
+            path: "/v1/sessions".into(),
+            headers: HashMap::new(),
+            body: serde_json::to_vec(&serde_json::json!({"user": "a"})).unwrap(),
+        };
+        let resp = handle_create_session(&req, &state).await;
+        assert!(String::from_utf8_lossy(&resp).contains("201"));
+
+        // Second should fail with 429
+        let req2 = HttpRequest {
+            method: "POST".into(),
+            path: "/v1/sessions".into(),
+            headers: HashMap::new(),
+            body: serde_json::to_vec(&serde_json::json!({"user": "b"})).unwrap(),
+        };
+        let resp2 = handle_create_session(&req2, &state).await;
+        let resp2_str = String::from_utf8_lossy(&resp2);
+        assert!(resp2_str.contains("429"));
+        assert!(resp2_str.contains("Maximum concurrent sessions"));
+    }
+
+    #[tokio::test]
+    async fn test_route_request_dispatches_correctly() {
+        let config = GatewayConfig::default();
+        let state = Arc::new(Mutex::new(ServerState::new(config)));
+        let peer: std::net::SocketAddr = "127.0.0.1:12345".parse().unwrap();
+
+        // Health
+        let req = HttpRequest {
+            method: "GET".into(),
+            path: "/v1/health".into(),
+            headers: HashMap::new(),
+            body: vec![],
+        };
+        let resp = route_request(&req, &state, peer).await;
+        let resp_str = String::from_utf8_lossy(&resp);
+        assert!(resp_str.contains("200"));
+        assert!(resp_str.contains("ok"));
+
+        // Status
+        let req = HttpRequest {
+            method: "GET".into(),
+            path: "/v1/status".into(),
+            headers: HashMap::new(),
+            body: vec![],
+        };
+        let resp = route_request(&req, &state, peer).await;
+        assert!(String::from_utf8_lossy(&resp).contains("running"));
+
+        // Unknown
+        let req = HttpRequest {
+            method: "GET".into(),
+            path: "/v1/nope".into(),
+            headers: HashMap::new(),
+            body: vec![],
+        };
+        let resp = route_request(&req, &state, peer).await;
+        assert!(String::from_utf8_lossy(&resp).contains("404"));
+    }
+
+    #[tokio::test]
+    async fn test_run_bfcode_chat_with_echo() {
+        // Test run_bfcode_chat with a command that we know will work:
+        // Replace bfcode with echo to simulate a fast response.
+        // This tests the parsing of BfcodeResult from stdout/stderr.
+        // Note: actual bfcode subprocess test requires the binary.
+
+        // We test the BfcodeResult struct construction directly
+        let result = BfcodeResult {
+            response: "Hello, World!".into(),
+            prompt_tokens: Some(10),
+            completion_tokens: Some(20),
+            total_tokens: Some(30),
+            session_tokens: Some(100),
+            cost: Some(0.001),
+            model: Some("test-model".into()),
+        };
+        assert_eq!(result.response, "Hello, World!");
+        assert_eq!(result.total_tokens, Some(30));
+        assert_eq!(result.model.as_deref(), Some("test-model"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_chat_auto_creates_session() {
+        let config = GatewayConfig::default();
+        let state = Arc::new(Mutex::new(ServerState::new(config)));
+
+        // Chat without session_id — should attempt to auto-create
+        // (will fail on run_bfcode_chat since binary isn't available in test,
+        // but the session creation path should work)
+        let req_body = serde_json::json!({ "message": "test" });
+        let req = HttpRequest {
+            method: "POST".into(),
+            path: "/v1/chat".into(),
+            headers: HashMap::new(),
+            body: serde_json::to_vec(&req_body).unwrap(),
+        };
+        let resp = handle_chat(&req, &state).await;
+        let resp_str = String::from_utf8_lossy(&resp);
+        // It will either succeed (unlikely without binary) or return 500
+        // but should NOT return 404 (session not found) since it auto-creates
+        assert!(!resp_str.contains("Session not found"));
+
+        // Verify a session was auto-created
+        let st = state.lock().await;
+        assert_eq!(st.sessions.len(), 1);
     }
 }

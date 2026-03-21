@@ -48,6 +48,9 @@ enum Commands {
         /// Optional initial message to send
         #[arg(trailing_var_arg = true)]
         message: Vec<String>,
+        /// One-shot mode: process message and exit (used by gateway)
+        #[arg(long, hide = true)]
+        oneshot: bool,
     },
 
     /// Manage sessions
@@ -314,12 +317,14 @@ async fn main() -> Result<()> {
 
     match cli.command {
         None | Some(Commands::Chat { .. }) => {
-            // Extract initial message if provided via `bfcode chat "message"`
-            let initial_message = match &cli.command {
-                Some(Commands::Chat { message }) if !message.is_empty() => Some(message.join(" ")),
-                _ => None,
+            // Extract initial message and oneshot flag
+            let (initial_message, oneshot) = match &cli.command {
+                Some(Commands::Chat { message, oneshot }) if !message.is_empty() => {
+                    (Some(message.join(" ")), *oneshot)
+                }
+                _ => (None, false),
             };
-            run_interactive(initial_message).await
+            run_interactive(initial_message, oneshot).await
         }
         Some(Commands::Session(cmd)) => run_session_command(cmd),
         Some(Commands::Model { name }) => run_model_command(name),
@@ -1094,7 +1099,7 @@ fn run_config() -> Result<()> {
 
 // --- Interactive REPL ---
 
-async fn run_interactive(initial_message: Option<String>) -> Result<()> {
+async fn run_interactive(initial_message: Option<String>, oneshot: bool) -> Result<()> {
     // Load global config
     let mut config = persistence::load_config();
 
@@ -1137,44 +1142,54 @@ async fn run_interactive(initial_message: Option<String>) -> Result<()> {
 
     let client = api::create_client(&config)?;
     let tool_defs = tools::get_tool_definitions();
-    let permissions = tools::Permissions::new();
+    let permissions = if oneshot {
+        tools::Permissions::new_auto_approve()
+    } else {
+        tools::Permissions::new()
+    };
 
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| ".".into());
 
-    // Welcome banner
-    let provider = types::detect_provider(&config.model);
-    println!("{}", "bfcode v0.6.0".green().bold());
-    println!("Project:  {}", cwd.dimmed());
-    println!(
-        "Model:    {} ({})",
-        config.model.cyan(),
-        format!("{provider}").dimmed()
-    );
-    println!(
-        "Session:  {} ({})",
-        session.id.cyan(),
-        session.title.dimmed()
-    );
-    if let Some(ref instr) = instructions {
-        // Extract filename from first line
-        let file_hint = instr
-            .lines()
-            .find(|l| l.contains("from "))
-            .unwrap_or("project instructions");
-        println!("Loaded:   {}", file_hint.dimmed());
+    // Welcome banner (suppress in oneshot mode to avoid polluting captured stdout)
+    if !oneshot {
+        let provider = types::detect_provider(&config.model);
+        println!("{}", "bfcode v0.6.0".green().bold());
+        println!("Project:  {}", cwd.dimmed());
+        println!(
+            "Model:    {} ({})",
+            config.model.cyan(),
+            format!("{provider}").dimmed()
+        );
+        println!(
+            "Session:  {} ({})",
+            session.id.cyan(),
+            session.title.dimmed()
+        );
+        if let Some(ref instr) = instructions {
+            // Extract filename from first line
+            let file_hint = instr
+                .lines()
+                .find(|l| l.contains("from "))
+                .unwrap_or("project instructions");
+            println!("Loaded:   {}", file_hint.dimmed());
+        }
+        println!();
+        println!(
+            "Type {} for commands, or use {} for CLI help",
+            "/help".yellow(),
+            "bfcode --help".yellow()
+        );
+        println!();
     }
-    println!();
-    println!(
-        "Type {} for commands, or use {} for CLI help",
-        "/help".yellow(),
-        "bfcode --help".yellow()
-    );
-    println!();
 
     // If an initial message was provided, process it first
     if let Some(ref msg) = initial_message {
+        if oneshot {
+            // Set flag so process_user_message emits metadata
+            unsafe { std::env::set_var("BFCODE_ONESHOT", "1"); }
+        }
         process_user_message(
             msg,
             &mut session,
@@ -1185,6 +1200,10 @@ async fn run_interactive(initial_message: Option<String>) -> Result<()> {
             &permissions,
         )
         .await?;
+        if oneshot {
+            unsafe { std::env::remove_var("BFCODE_ONESHOT"); }
+            return Ok(());
+        }
     }
 
     let stdin = std::io::stdin();
@@ -1411,6 +1430,19 @@ async fn process_user_message(
                 format_tokens(session.total_tokens).dimmed(),
                 types::format_cost(cost).dimmed(),
             );
+            // Emit machine-readable metadata in oneshot mode
+            if std::env::var("BFCODE_ONESHOT").is_ok() {
+                let meta = serde_json::json!({
+                    "__bfcode_meta__": true,
+                    "prompt_tokens": usage.prompt_tokens,
+                    "completion_tokens": usage.completion_tokens,
+                    "total_tokens": usage.total_tokens,
+                    "session_tokens": session.total_tokens,
+                    "cost": cost,
+                    "model": &config.model,
+                });
+                eprintln!("__BFCODE_META__{}", meta);
+            }
         }
 
         break;

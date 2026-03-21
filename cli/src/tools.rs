@@ -370,12 +370,22 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
 pub struct Permissions {
     /// Tool patterns that are always allowed (e.g., "bash:cargo *", "write:*")
     always_allowed: Mutex<HashSet<String>>,
+    /// When true, auto-approve all tool calls without prompting (gateway oneshot mode)
+    pub auto_approve: bool,
 }
 
 impl Permissions {
     pub fn new() -> Self {
         Self {
             always_allowed: Mutex::new(HashSet::new()),
+            auto_approve: false,
+        }
+    }
+
+    pub fn new_auto_approve() -> Self {
+        Self {
+            always_allowed: Mutex::new(HashSet::new()),
+            auto_approve: true,
         }
     }
 
@@ -399,6 +409,19 @@ impl Permissions {
     fn ask_permission(&self, tool: &str, summary: &str) -> PermissionReply {
         let key = format!("{tool}:{summary}");
         if self.is_allowed(&key) {
+            return PermissionReply::Allow;
+        }
+
+        // In oneshot mode (gateway subprocess), auto-approve all tools
+        // since there is no TTY to prompt the user.
+        if self.auto_approve {
+            eprintln!(
+                "  {} {} {} {}",
+                "✓".green(),
+                format!("Auto-allow {tool}:").white().bold(),
+                summary,
+                "(oneshot mode)".dimmed()
+            );
             return PermissionReply::Allow;
         }
 
@@ -2765,5 +2788,66 @@ mod tests {
         assert!(defs.iter().any(|d| d.function.name == "memory_save"));
         assert!(defs.iter().any(|d| d.function.name == "memory_delete"));
         assert!(defs.iter().any(|d| d.function.name == "memory_list"));
+    }
+
+    // --- Oneshot mode auto-approve ---
+
+    fn permissions_with_auto_approve() -> Permissions {
+        Permissions {
+            always_allowed: Mutex::new(HashSet::new()),
+            auto_approve: true,
+        }
+    }
+
+    #[test]
+    fn test_permissions_oneshot_auto_approve() {
+        let perms = permissions_with_auto_approve();
+        // ask_permission should auto-approve without reading stdin
+        let reply = perms.ask_permission("bash", "echo hello");
+        assert!(matches!(reply, PermissionReply::Allow));
+
+        let reply = perms.ask_permission("write", "foo.txt (10 bytes)");
+        assert!(matches!(reply, PermissionReply::Allow));
+
+        let reply = perms.ask_permission("edit", "bar.rs (1 occurrence)");
+        assert!(matches!(reply, PermissionReply::Allow));
+    }
+
+    #[test]
+    fn test_permissions_no_auto_approve_not_pre_allowed() {
+        let perms = Permissions {
+            always_allowed: Mutex::new(HashSet::new()),
+            auto_approve: false,
+        };
+        // Without auto_approve and without allow_always, the tool should NOT be pre-allowed
+        assert!(!perms.is_allowed("bash:echo hello"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_tool_oneshot_allows_bash() {
+        let perms = permissions_with_auto_approve();
+        let result = execute_tool("bash", r#"{"command": "echo oneshot_test"}"#, &perms, "test").await;
+        assert!(result.contains("oneshot_test"));
+        assert!(result.contains("exit code: 0"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_tool_oneshot_allows_write() {
+        let dir = std::env::temp_dir().join("bfcode_test_oneshot_write");
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("oneshot.txt");
+
+        let perms = permissions_with_auto_approve();
+        let args = format!(
+            r#"{{"path": "{}", "content": "written in oneshot mode"}}"#,
+            file.display()
+        );
+        let result = execute_tool("write", &args, &perms, "test").await;
+        assert!(result.contains("Wrote"));
+
+        let content = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(content, "written in oneshot mode");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
