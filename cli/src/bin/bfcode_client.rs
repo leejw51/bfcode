@@ -198,9 +198,15 @@ async fn main() -> Result<()> {
     // Check gateway status
     match gw.check_status().await {
         Ok(status) => {
-            let version = status.get("version").and_then(|v| v.as_str()).unwrap_or("?");
+            let version = status
+                .get("version")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
             let mode = status.get("mode").and_then(|v| v.as_str()).unwrap_or("?");
-            let uptime = status.get("uptime_secs").and_then(|v| v.as_u64()).unwrap_or(0);
+            let uptime = status
+                .get("uptime_secs")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
             println!(
                 "{} gateway v{} (mode: {}, uptime: {}s)",
                 "bfcode-client".cyan().bold(),

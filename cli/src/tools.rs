@@ -3,6 +3,7 @@ use anyhow::{Context, Result, bail, ensure};
 use colored::Colorize;
 use std::collections::HashSet;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 // Output limits (inspired by opencode)
@@ -370,22 +371,22 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
 pub struct Permissions {
     /// Tool patterns that are always allowed (e.g., "bash:cargo *", "write:*")
     always_allowed: Mutex<HashSet<String>>,
-    /// When true, auto-approve all tool calls without prompting (gateway oneshot mode)
-    pub auto_approve: bool,
+    /// When true, auto-approve all tool calls without prompting
+    pub auto_approve: AtomicBool,
 }
 
 impl Permissions {
     pub fn new() -> Self {
         Self {
             always_allowed: Mutex::new(HashSet::new()),
-            auto_approve: false,
+            auto_approve: AtomicBool::new(false),
         }
     }
 
     pub fn new_auto_approve() -> Self {
         Self {
             always_allowed: Mutex::new(HashSet::new()),
-            auto_approve: true,
+            auto_approve: AtomicBool::new(true),
         }
     }
 
@@ -414,13 +415,13 @@ impl Permissions {
 
         // In oneshot mode (gateway subprocess), auto-approve all tools
         // since there is no TTY to prompt the user.
-        if self.auto_approve {
+        if self.auto_approve.load(Ordering::Relaxed) {
             eprintln!(
                 "  {} {} {} {}",
                 "✓".green(),
                 format!("Auto-allow {tool}:").white().bold(),
                 summary,
-                "(oneshot mode)".dimmed()
+                "(auto-approved)".dimmed()
             );
             return PermissionReply::Allow;
         }
@@ -442,12 +443,12 @@ impl Permissions {
         match input.trim().to_lowercase().as_str() {
             "y" | "yes" => PermissionReply::Allow,
             "a" | "always" => {
-                // Allow this tool type always for this session
-                self.allow_always(&format!("{tool}:*"));
+                // Auto-approve all tools for this session
+                self.auto_approve.store(true, Ordering::Relaxed);
                 eprintln!(
                     "  {} {}",
                     "✓".green(),
-                    format!("{tool} always allowed for this session").dimmed()
+                    "All tools auto-approved for this session".dimmed()
                 );
                 PermissionReply::Allow
             }
@@ -2795,7 +2796,7 @@ mod tests {
     fn permissions_with_auto_approve() -> Permissions {
         Permissions {
             always_allowed: Mutex::new(HashSet::new()),
-            auto_approve: true,
+            auto_approve: AtomicBool::new(true),
         }
     }
 
@@ -2817,7 +2818,7 @@ mod tests {
     fn test_permissions_no_auto_approve_not_pre_allowed() {
         let perms = Permissions {
             always_allowed: Mutex::new(HashSet::new()),
-            auto_approve: false,
+            auto_approve: AtomicBool::new(false),
         };
         // Without auto_approve and without allow_always, the tool should NOT be pre-allowed
         assert!(!perms.is_allowed("bash:echo hello"));
@@ -2826,7 +2827,13 @@ mod tests {
     #[tokio::test]
     async fn test_execute_tool_oneshot_allows_bash() {
         let perms = permissions_with_auto_approve();
-        let result = execute_tool("bash", r#"{"command": "echo oneshot_test"}"#, &perms, "test").await;
+        let result = execute_tool(
+            "bash",
+            r#"{"command": "echo oneshot_test"}"#,
+            &perms,
+            "test",
+        )
+        .await;
         assert!(result.contains("oneshot_test"));
         assert!(result.contains("exit code: 0"));
     }

@@ -1188,7 +1188,9 @@ async fn run_interactive(initial_message: Option<String>, oneshot: bool) -> Resu
     if let Some(ref msg) = initial_message {
         if oneshot {
             // Set flag so process_user_message emits metadata
-            unsafe { std::env::set_var("BFCODE_ONESHOT", "1"); }
+            unsafe {
+                std::env::set_var("BFCODE_ONESHOT", "1");
+            }
         }
         process_user_message(
             msg,
@@ -1201,7 +1203,9 @@ async fn run_interactive(initial_message: Option<String>, oneshot: bool) -> Resu
         )
         .await?;
         if oneshot {
-            unsafe { std::env::remove_var("BFCODE_ONESHOT"); }
+            unsafe {
+                std::env::remove_var("BFCODE_ONESHOT");
+            }
             return Ok(());
         }
     }

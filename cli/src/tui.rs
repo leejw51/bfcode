@@ -336,10 +336,17 @@ pub fn draw(f: &mut Frame, app: &App) {
     let input_lines: usize = if input_inner_width == 0 {
         1
     } else {
-        app.input.split('\n').map(|line| {
-            let w = line.len();
-            if w == 0 { 1 } else { (w + input_inner_width - 1) / input_inner_width }
-        }).sum()
+        app.input
+            .split('\n')
+            .map(|line| {
+                let w = line.len();
+                if w == 0 {
+                    1
+                } else {
+                    (w + input_inner_width - 1) / input_inner_width
+                }
+            })
+            .sum()
     };
     let input_height = (input_lines as u16 + 2).clamp(3, 10); // +2 for borders
 
@@ -510,7 +517,11 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     } else if let Some(ref msg) = app.status_message {
         msg.clone()
     } else {
-        let word_count: usize = app.messages.iter().map(|m| m.content.split_whitespace().count()).sum();
+        let word_count: usize = app
+            .messages
+            .iter()
+            .map(|m| m.content.split_whitespace().count())
+            .sum();
         format!(
             " {} | Session: {} | Tokens: {} | Cost: ${:.4} | Words: {}",
             app.model, app.session_id, app.tokens, app.cost, word_count,
@@ -591,27 +602,63 @@ fn draw_help_overlay(f: &mut Frame, app: &App) {
     let popup_area = Rect::new(x, y, popup_width, popup_height);
 
     // Clear background
-    let clear = Paragraph::new("")
-        .style(Style::default().bg(Color::Black));
+    let clear = Paragraph::new("").style(Style::default().bg(Color::Black));
     f.render_widget(clear, popup_area);
 
     let help_text = vec![
-        Line::from(Span::styled("Keyboard Shortcuts", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(
+            "Keyboard Shortcuts",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )),
         Line::from(""),
-        Line::from(vec![Span::styled("Enter        ", Style::default().fg(Color::Yellow)), Span::raw("Send message")]),
-        Line::from(vec![Span::styled("Ctrl+Enter   ", Style::default().fg(Color::Yellow)), Span::raw("Insert newline")]),
-        Line::from(vec![Span::styled("Up/Down      ", Style::default().fg(Color::Yellow)), Span::raw("Browse history")]),
-        Line::from(vec![Span::styled("PageUp/Down  ", Style::default().fg(Color::Yellow)), Span::raw("Scroll chat")]),
-        Line::from(vec![Span::styled("Ctrl+L       ", Style::default().fg(Color::Yellow)), Span::raw("Clear chat")]),
-        Line::from(vec![Span::styled("Ctrl+/       ", Style::default().fg(Color::Yellow)), Span::raw("Toggle this help")]),
-        Line::from(vec![Span::styled("Ctrl+C / Esc ", Style::default().fg(Color::Yellow)), Span::raw("Quit")]),
+        Line::from(vec![
+            Span::styled("Enter        ", Style::default().fg(Color::Yellow)),
+            Span::raw("Send message"),
+        ]),
+        Line::from(vec![
+            Span::styled("Ctrl+Enter   ", Style::default().fg(Color::Yellow)),
+            Span::raw("Insert newline"),
+        ]),
+        Line::from(vec![
+            Span::styled("Up/Down      ", Style::default().fg(Color::Yellow)),
+            Span::raw("Browse history"),
+        ]),
+        Line::from(vec![
+            Span::styled("PageUp/Down  ", Style::default().fg(Color::Yellow)),
+            Span::raw("Scroll chat"),
+        ]),
+        Line::from(vec![
+            Span::styled("Ctrl+L       ", Style::default().fg(Color::Yellow)),
+            Span::raw("Clear chat"),
+        ]),
+        Line::from(vec![
+            Span::styled("Ctrl+/       ", Style::default().fg(Color::Yellow)),
+            Span::raw("Toggle this help"),
+        ]),
+        Line::from(vec![
+            Span::styled("Ctrl+C / Esc ", Style::default().fg(Color::Yellow)),
+            Span::raw("Quit"),
+        ]),
         Line::from(""),
-        Line::from(vec![Span::styled("/help        ", Style::default().fg(Color::Green)), Span::raw("Slash commands")]),
-        Line::from(vec![Span::styled("/quit        ", Style::default().fg(Color::Green)), Span::raw("Exit")]),
+        Line::from(vec![
+            Span::styled("/help        ", Style::default().fg(Color::Green)),
+            Span::raw("Slash commands"),
+        ]),
+        Line::from(vec![
+            Span::styled("/quit        ", Style::default().fg(Color::Green)),
+            Span::raw("Exit"),
+        ]),
     ];
 
     let help = Paragraph::new(help_text)
-        .block(Block::default().borders(Borders::ALL).title(" Help ").border_style(Style::default().fg(Color::Cyan)))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Help ")
+                .border_style(Style::default().fg(Color::Cyan)),
+        )
         .style(Style::default().bg(Color::Black));
     f.render_widget(help, popup_area);
 }
