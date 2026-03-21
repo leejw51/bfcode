@@ -38,6 +38,10 @@ pub struct FullConfig {
     #[serde(default)]
     pub include: Vec<String>,
 
+    /// Ordered list of fallback models for failover on rate-limit / outage.
+    #[serde(default)]
+    pub fallback_models: Vec<String>,
+
     /// Schema version used for automatic migration.
     #[serde(default = "default_version")]
     pub config_version: u32,
@@ -109,6 +113,7 @@ fn default_config_value() -> serde_json::Value {
         "hooks": [],
         "env": {},
         "include": [],
+        "fallback_models": [],
         "config_version": 2
     })
 }

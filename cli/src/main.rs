@@ -6,7 +6,9 @@ mod context;
 mod cron;
 mod daemon;
 mod doctor;
+mod fallback;
 mod gateway;
+mod guard;
 mod persistence;
 mod plugin;
 mod search;
@@ -1148,7 +1150,27 @@ async fn run_interactive(initial_message: Option<String>, oneshot: bool) -> Resu
             .insert(0, Message::system(&full_system_prompt));
     }
 
-    let client = api::create_client(&config)?;
+    // Build client — use FallbackChain if fallback models are configured
+    let client: Box<dyn api::ChatClient> = if config.fallback_models.is_empty() {
+        api::create_client(&config)?
+    } else {
+        eprintln!(
+            "  {} Fallback chain: {} → {}",
+            "↻".yellow(),
+            config.model.cyan(),
+            config
+                .fallback_models
+                .iter()
+                .map(|m| m.as_str())
+                .collect::<Vec<_>>()
+                .join(" → ")
+                .dimmed()
+        );
+        Box::new(fallback::FallbackChain::build(
+            &config.model,
+            &config.fallback_models,
+        )?)
+    };
     let tool_defs = tools::get_tool_definitions();
     let permissions = if oneshot {
         tools::Permissions::new_auto_approve()
@@ -1383,19 +1405,63 @@ async fn process_user_message(
         session.conversation.push(Message::user(input));
     }
 
-    // Token-aware auto-compaction
-    let estimated = context::estimate_conversation_tokens(&session.conversation);
-    let limit = types::context_limit_for_model(&config.model);
-    if limit > 0 && estimated > (limit * 80 / 100) {
-        eprintln!(
-            "  {} Auto-compacting ({} tokens, {}% of {} limit)...",
-            "~".yellow(),
-            format_tokens(estimated),
-            estimated * 100 / limit,
-            format_tokens(limit)
-        );
-        compact_conversation(session, full_system_prompt);
-        persistence::save_session(session)?;
+    // Context Window Guard — pre-flight check before sending to LLM
+    let ctx_check = guard::check_context_window(&session.conversation, &config.model);
+    match ctx_check.status {
+        guard::ContextStatus::Blocked => {
+            eprintln!(
+                "  {} Context window guard: {} tokens used, only {} remaining (hard floor: {}). Compacting...",
+                "⚠".red().bold(),
+                format_tokens(ctx_check.estimated_tokens),
+                format_tokens(ctx_check.remaining),
+                format_tokens(guard::CONTEXT_WINDOW_HARD_MIN_TOKENS),
+            );
+            compact_conversation(session, full_system_prompt);
+            persistence::save_session(session)?;
+            // Re-check after compaction
+            let recheck = guard::check_context_window(&session.conversation, &config.model);
+            if recheck.blocked {
+                eprintln!(
+                    "  {} Still over limit after compaction ({} tokens). Starting fresh session.",
+                    "✗".red().bold(),
+                    format_tokens(recheck.estimated_tokens),
+                );
+                // Keep only system message + last user message
+                let system_msg = session.conversation.first().cloned();
+                let last_user = session.conversation.last().cloned();
+                session.conversation.clear();
+                if let Some(sys) = system_msg {
+                    session.conversation.push(sys);
+                }
+                if let Some(usr) = last_user {
+                    session.conversation.push(usr);
+                }
+                persistence::save_session(session)?;
+            }
+        }
+        guard::ContextStatus::PreemptiveOverflow => {
+            eprintln!(
+                "  {} Preemptive overflow: {} tokens ({:.0}% of {} limit). Compacting...",
+                "~".yellow().bold(),
+                format_tokens(ctx_check.estimated_tokens),
+                ctx_check.estimated_tokens as f64 / ctx_check.context_limit as f64 * 100.0,
+                format_tokens(ctx_check.context_limit),
+            );
+            compact_conversation(session, full_system_prompt);
+            persistence::save_session(session)?;
+        }
+        guard::ContextStatus::Warning => {
+            eprintln!(
+                "  {} Auto-compacting ({} tokens, {:.0}% of {} limit)...",
+                "~".yellow(),
+                format_tokens(ctx_check.estimated_tokens),
+                ctx_check.estimated_tokens as f64 / ctx_check.context_limit as f64 * 100.0,
+                format_tokens(ctx_check.context_limit),
+            );
+            compact_conversation(session, full_system_prompt);
+            persistence::save_session(session)?;
+        }
+        guard::ContextStatus::Ok => {}
     }
 
     // Agent loop
@@ -1486,6 +1552,8 @@ async fn process_user_message(
                     &session.id,
                 )
                 .await;
+                // Context Window Guard: truncate oversized tool results
+                let result = guard::truncate_tool_result(&result, &config.model);
                 tools::print_tool_result(&result);
                 session
                     .conversation

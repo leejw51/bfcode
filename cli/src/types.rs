@@ -591,6 +591,9 @@ pub struct GlobalConfig {
     pub system_prompt: String,
     #[serde(default)]
     pub provider: Provider,
+    /// Ordered list of fallback models to try when the primary hits rate-limit / outage.
+    #[serde(default)]
+    pub fallback_models: Vec<String>,
 }
 
 impl Default for GlobalConfig {
@@ -600,6 +603,7 @@ impl Default for GlobalConfig {
             temperature: 0.0,
             system_prompt: SYSTEM_PROMPT.into(),
             provider: Provider::Grok,
+            fallback_models: Vec::new(),
         }
     }
 }
