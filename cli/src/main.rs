@@ -1,7 +1,11 @@
 mod api;
 mod browser;
+mod config;
 mod context;
 mod cron;
+mod daemon;
+mod doctor;
+mod gateway;
 mod persistence;
 mod plugin;
 mod search;
@@ -87,6 +91,24 @@ enum Commands {
     /// Manage cron jobs
     #[command(subcommand)]
     Cron(CronCommands),
+
+    /// Start gateway server (HTTP API for multi-user access)
+    #[command(subcommand)]
+    Gateway(GatewayCommands),
+
+    /// Manage daemon mode (background service)
+    #[command(subcommand)]
+    Daemon(DaemonCommands),
+
+    /// Run health checks and diagnostics
+    Doctor,
+
+    /// Show system diagnostics info
+    Diagnostics,
+
+    /// Initialize or show enhanced configuration
+    #[command(subcommand)]
+    Cfg(CfgCommands),
 }
 
 #[derive(Subcommand)]
@@ -202,6 +224,73 @@ enum CronCommands {
 }
 
 #[derive(Subcommand)]
+enum GatewayCommands {
+    /// Start the gateway server
+    Start {
+        /// Listen address (default: 127.0.0.1:8642)
+        #[arg(short, long)]
+        listen: Option<String>,
+        /// Enable Tailscale integration
+        #[arg(long)]
+        tailscale: bool,
+    },
+    /// Show gateway status
+    Status {
+        /// Gateway URL to check (for remote mode)
+        #[arg(short, long)]
+        url: Option<String>,
+    },
+    /// Send a message to a remote gateway
+    Chat {
+        /// Gateway URL
+        #[arg(short, long)]
+        url: String,
+        /// API key for authentication
+        #[arg(short, long)]
+        key: Option<String>,
+        /// Message to send
+        message: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum DaemonCommands {
+    /// Start bfcode as a background daemon
+    Start,
+    /// Stop the running daemon
+    Stop,
+    /// Show daemon status
+    Status,
+    /// Install as a system service (systemd/launchd)
+    Install,
+    /// Uninstall the system service
+    Uninstall,
+    /// Check for updates
+    Update,
+}
+
+#[derive(Subcommand)]
+enum CfgCommands {
+    /// Show merged configuration with sources
+    Show,
+    /// Validate configuration files
+    Validate,
+    /// Initialize a new config file
+    Init {
+        /// Format: json or yaml
+        #[arg(short, long, default_value = "yaml")]
+        format: String,
+        /// Create in project dir (.bfcode/) instead of global (~/.bfcode/)
+        #[arg(long)]
+        project: bool,
+    },
+    /// Show config file locations
+    Sources,
+    /// Migrate old config format to current
+    Migrate,
+}
+
+#[derive(Subcommand)]
 enum ContextCommands {
     /// Generate environment context snapshot (.bfcode/context/environment.md)
     Env,
@@ -241,6 +330,11 @@ async fn main() -> Result<()> {
         Some(Commands::Undo { count }) => run_undo(count),
         Some(Commands::Skills(cmd)) => run_skills_command(cmd),
         Some(Commands::Cron(cmd)) => run_cron_command(cmd),
+        Some(Commands::Gateway(cmd)) => run_gateway_command(cmd).await,
+        Some(Commands::Daemon(cmd)) => run_daemon_command(cmd).await,
+        Some(Commands::Doctor) => run_doctor_command().await,
+        Some(Commands::Diagnostics) => run_diagnostics_command(),
+        Some(Commands::Cfg(cmd)) => run_cfg_command(cmd),
     }
 }
 
@@ -689,6 +783,278 @@ fn run_cron_command(cmd: CronCommands) -> Result<()> {
     Ok(())
 }
 
+async fn run_gateway_command(cmd: GatewayCommands) -> Result<()> {
+    match cmd {
+        GatewayCommands::Start { listen, tailscale } => {
+            let mut config = gateway::load_gateway_config();
+            if let Some(addr) = listen {
+                config.listen = addr;
+            }
+            if tailscale {
+                config.tailscale = true;
+            }
+            gateway::start_server(&config).await
+        }
+        GatewayCommands::Status { url } => {
+            if let Some(url) = url {
+                match gateway::remote_status(&url, None).await {
+                    Ok(status) => print!("{}", gateway::format_status(&status)),
+                    Err(e) => println!("{}", format!("Failed to get status: {e}").red()),
+                }
+            } else {
+                let config = gateway::load_gateway_config();
+                println!("{}", "Gateway Configuration:".yellow().bold());
+                println!("  Listen: {}", config.listen.cyan());
+                println!("  Mode:   {}", format!("{}", config.mode).cyan());
+                println!(
+                    "  Tailscale: {}",
+                    if config.tailscale {
+                        "enabled".green().to_string()
+                    } else {
+                        "disabled".dimmed().to_string()
+                    }
+                );
+                if let Some(ip) = gateway::tailscale_ip() {
+                    println!("  Tailscale IP: {}", ip.cyan());
+                }
+            }
+            Ok(())
+        }
+        GatewayCommands::Chat { url, key, message } => {
+            match gateway::remote_chat(&url, key.as_deref(), &message).await {
+                Ok(response) => println!("{response}"),
+                Err(e) => println!("{}", format!("Gateway chat failed: {e}").red()),
+            }
+            Ok(())
+        }
+    }
+}
+
+async fn run_daemon_command(cmd: DaemonCommands) -> Result<()> {
+    let config = daemon::load_daemon_config();
+    match cmd {
+        DaemonCommands::Start => {
+            daemon::start_daemon(&config)?;
+            println!("{}", "Daemon started.".green());
+            Ok(())
+        }
+        DaemonCommands::Stop => {
+            daemon::stop_daemon(&config)?;
+            println!("{}", "Daemon stopped.".green());
+            Ok(())
+        }
+        DaemonCommands::Status => {
+            let status = daemon::daemon_status(&config);
+            print!("{}", daemon::format_status(&status));
+            Ok(())
+        }
+        DaemonCommands::Install => {
+            match daemon::install_service() {
+                Ok(msg) => println!("{}", msg.green()),
+                Err(e) => println!("{}", format!("Install failed: {e}").red()),
+            }
+            Ok(())
+        }
+        DaemonCommands::Uninstall => {
+            match daemon::uninstall_service() {
+                Ok(msg) => println!("{}", msg.green()),
+                Err(e) => println!("{}", format!("Uninstall failed: {e}").red()),
+            }
+            Ok(())
+        }
+        DaemonCommands::Update => {
+            match daemon::check_for_updates().await {
+                Ok(Some(info)) => {
+                    println!(
+                        "{} {} → {}",
+                        "Update available:".yellow().bold(),
+                        info.current_version.dimmed(),
+                        info.latest_version.green()
+                    );
+                    if !info.release_notes.is_empty() {
+                        println!("{}", info.release_notes.dimmed());
+                    }
+                    print!("Install update? [y/N] ");
+                    std::io::stdout().flush()?;
+                    let mut input = String::new();
+                    std::io::stdin().read_line(&mut input)?;
+                    if input.trim().to_lowercase() == "y" {
+                        daemon::self_update(&info).await?;
+                        println!("{}", "Updated successfully! Restart bfcode to use the new version.".green());
+                    }
+                }
+                Ok(None) => println!("{}", "Already up to date.".green()),
+                Err(e) => println!("{}", format!("Update check failed: {e}").yellow()),
+            }
+            Ok(())
+        }
+    }
+}
+
+async fn run_doctor_command() -> Result<()> {
+    println!("{}", "Running health checks...".yellow().bold());
+    println!();
+    let results = doctor::run_doctor().await;
+    print!("{}", doctor::format_doctor_results(&results));
+    Ok(())
+}
+
+fn run_diagnostics_command() -> Result<()> {
+    let info = doctor::collect_diagnostics();
+    print!("{}", doctor::format_diagnostics(&info));
+    Ok(())
+}
+
+fn run_cfg_command(cmd: CfgCommands) -> Result<()> {
+    match cmd {
+        CfgCommands::Show => {
+            let config = config::load_full_config()?;
+            let sources = config::find_config_files();
+            print!("{}", config::format_config_info(&config, &sources));
+            Ok(())
+        }
+        CfgCommands::Validate => {
+            let sources = config::find_config_files();
+            if sources.is_empty() {
+                println!("{}", "No config files found.".dimmed());
+                return Ok(());
+            }
+            for source in &sources {
+                match config::load_config_file(&source.path) {
+                    Ok(value) => {
+                        let errors = config::validate_config(&value);
+                        if errors.is_empty() {
+                            println!(
+                                "  {} {}",
+                                "✓".green(),
+                                source.path.display()
+                            );
+                        } else {
+                            println!(
+                                "  {} {} ({} issue(s))",
+                                "⚠".yellow(),
+                                source.path.display(),
+                                errors.len()
+                            );
+                            for err in &errors {
+                                println!("    - {}", err);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        println!(
+                            "  {} {} — {}",
+                            "✗".red(),
+                            source.path.display(),
+                            e
+                        );
+                    }
+                }
+            }
+            Ok(())
+        }
+        CfgCommands::Init { format, project } => {
+            let fmt = if format == "json" {
+                config::ConfigFormat::Json
+            } else {
+                config::ConfigFormat::Yaml
+            };
+            let dir = if project {
+                std::path::PathBuf::from(".bfcode")
+            } else {
+                dirs::home_dir()
+                    .context("Could not determine home directory")?
+                    .join(".bfcode")
+            };
+            std::fs::create_dir_all(&dir)?;
+            let filename = if fmt == config::ConfigFormat::Json {
+                "config.json"
+            } else {
+                "config.yaml"
+            };
+            let path = dir.join(filename);
+            if path.exists() {
+                println!(
+                    "{}",
+                    format!("Config already exists: {}", path.display()).yellow()
+                );
+            } else {
+                config::init_config(&path, fmt)?;
+                println!(
+                    "{}",
+                    format!("Created config: {}", path.display()).green()
+                );
+            }
+            Ok(())
+        }
+        CfgCommands::Sources => {
+            let sources = config::find_config_files();
+            if sources.is_empty() {
+                println!("{}", "No config files found.".dimmed());
+            } else {
+                println!("{}", "Config sources (priority order):".yellow().bold());
+                for (i, source) in sources.iter().enumerate() {
+                    let exists = source.path.exists();
+                    let status = if exists {
+                        "✓".green().to_string()
+                    } else {
+                        "·".dimmed().to_string()
+                    };
+                    println!(
+                        "  {} {}. {} ({:?})",
+                        status,
+                        i + 1,
+                        source.path.display(),
+                        source.format
+                    );
+                }
+            }
+            Ok(())
+        }
+        CfgCommands::Migrate => {
+            let sources = config::find_config_files();
+            let mut migrated = false;
+            for source in &sources {
+                if source.path.exists() {
+                    if let Ok(mut value) = config::load_config_file(&source.path) {
+                        match config::migrate_config(&mut value) {
+                            Ok(true) => {
+                                let json = serde_json::to_string_pretty(&value)?;
+                                std::fs::write(&source.path, &json)?;
+                                println!(
+                                    "  {} Migrated {}",
+                                    "✓".green(),
+                                    source.path.display()
+                                );
+                                migrated = true;
+                            }
+                            Ok(false) => {
+                                println!(
+                                    "  {} {} (already current)",
+                                    "·".dimmed(),
+                                    source.path.display()
+                                );
+                            }
+                            Err(e) => {
+                                println!(
+                                    "  {} {} — {}",
+                                    "✗".red(),
+                                    source.path.display(),
+                                    e
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            if !migrated {
+                println!("{}", "No migration needed.".green());
+            }
+            Ok(())
+        }
+    }
+}
+
 fn format_size(bytes: u64) -> String {
     if bytes >= 1024 * 1024 {
         format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
@@ -865,6 +1231,15 @@ async fn run_interactive(initial_message: Option<String>) -> Result<()> {
                 continue;
             }
 
+            // Handle /doctor specially (needs async)
+            if input == "/doctor" {
+                println!("{}", "Running health checks...".yellow().bold());
+                println!();
+                let results = doctor::run_doctor().await;
+                print!("{}", doctor::format_doctor_results(&results));
+                continue;
+            }
+
             let handled = handle_command(input, &mut session, &mut config, &full_system_prompt)?;
             if handled == CommandResult::Quit {
                 break;
@@ -942,10 +1317,19 @@ async fn process_user_message(
         let model = config.model.clone();
         let temp = config.temperature;
 
+        // Start spinner while waiting for API response
+        let spinner_running = Arc::new(AtomicBool::new(true));
+        let spinner_handle = start_spinner(spinner_running.clone());
+
         // Spawn streaming request
         let stream_result = client
             .chat_stream(&messages, &tools_clone, &model, temp, tx)
             .await;
+
+        // Stop spinner
+        spinner_running.store(false, Ordering::Relaxed);
+        let _ = spinner_handle.await;
+        eprint!("\r                              \r"); // clear spinner line
 
         // Drain any remaining chunks (print streamed text)
         let mut streamed_any_text = false;
@@ -1092,6 +1476,7 @@ fn handle_command(
             println!("  {}       - list available skills", "/skills".yellow());
             println!("  {} - activate a skill", "/skill <name>".yellow());
             println!("  {}    - manage cron jobs", "/cron [cmd]".yellow());
+            println!("  {}       - run health checks", "/doctor".yellow());
             println!("  {}         - exit", "/quit".yellow());
             println!();
             println!("{}", "Image input:".yellow().bold());
@@ -1111,6 +1496,11 @@ fn handle_command(
             println!("  {}    - undo file changes", "bfcode undo [n]".yellow());
             println!("  {} - list/show/import skills", "bfcode skills ...".yellow());
             println!("  {} - list/add/remove cron jobs", "bfcode cron ...".yellow());
+            println!("  {}       - run health checks", "bfcode doctor".yellow());
+            println!("  {}  - system diagnostics", "bfcode diagnostics".yellow());
+            println!("  {} - start HTTP API server", "bfcode gateway ...".yellow());
+            println!("  {}  - background service", "bfcode daemon ...".yellow());
+            println!("  {}  - enhanced config mgmt", "bfcode cfg ...".yellow());
         }
         "/clear" => {
             persistence::clear_session(session);

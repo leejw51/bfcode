@@ -12,7 +12,10 @@ const DEFAULT_READ_LIMIT: u64 = 2000;
 const MAX_CHARS_PER_LINE: usize = 2000;
 
 pub fn get_tool_definitions() -> Vec<ToolDefinition> {
-    vec![
+    let has_search_key = std::env::var("BRAVE_API_KEY").is_ok() || std::env::var("TAVILY_API_KEY").is_ok();
+    let has_openai_key = std::env::var("OPENAI_API_KEY").is_ok();
+
+    let mut tools = vec![
         ToolDefinition {
             tool_type: "function".into(),
             function: FunctionSchema {
@@ -210,21 +213,6 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         ToolDefinition {
             tool_type: "function".into(),
             function: FunctionSchema {
-                name: "websearch".into(),
-                description: "Search the web using Brave Search or Tavily API. Returns titles, URLs, and snippets.".into(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string", "description": "Search query"},
-                        "num_results": {"type": "integer", "description": "Number of results to return. Default 5."}
-                    },
-                    "required": ["query"]
-                }),
-            },
-        },
-        ToolDefinition {
-            tool_type: "function".into(),
-            function: FunctionSchema {
                 name: "pdf_read".into(),
                 description: "Extract text content from a PDF file. Returns text with page markers.".into(),
                 parameters: serde_json::json!({
@@ -234,22 +222,6 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                         "pages": {"type": "string", "description": "Page range to read (e.g. \"1-5\", \"3\", \"10-20\"). Optional, defaults to all pages."}
                     },
                     "required": ["path"]
-                }),
-            },
-        },
-        ToolDefinition {
-            tool_type: "function".into(),
-            function: FunctionSchema {
-                name: "image_generate".into(),
-                description: "Generate an image using DALL-E API. Saves the image locally and returns the file path.".into(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "prompt": {"type": "string", "description": "Image generation prompt describing what to create"},
-                        "size": {"type": "string", "description": "Image size: \"1024x1024\", \"1792x1024\", \"1024x1792\". Default \"1024x1024\"."},
-                        "output_path": {"type": "string", "description": "Path to save the image. Default: .bfcode/generated/<timestamp>.png"}
-                    },
-                    "required": ["prompt"]
                 }),
             },
         },
@@ -350,7 +322,47 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                 }),
             },
         },
-    ]
+    ];
+
+    // Conditionally add tools that require API keys
+    if has_search_key {
+        tools.push(ToolDefinition {
+            tool_type: "function".into(),
+            function: FunctionSchema {
+                name: "websearch".into(),
+                description: "Search the web using Brave Search or Tavily API. Returns titles, URLs, and snippets.".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Search query"},
+                        "num_results": {"type": "integer", "description": "Number of results to return. Default 5."}
+                    },
+                    "required": ["query"]
+                }),
+            },
+        });
+    }
+
+    if has_openai_key {
+        tools.push(ToolDefinition {
+            tool_type: "function".into(),
+            function: FunctionSchema {
+                name: "image_generate".into(),
+                description: "Generate an image using DALL-E API. Saves the image locally and returns the file path.".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "prompt": {"type": "string", "description": "Image generation prompt describing what to create"},
+                        "size": {"type": "string", "description": "Image size: \"1024x1024\", \"1792x1024\", \"1024x1792\". Default \"1024x1024\"."},
+                        "output_path": {"type": "string", "description": "Path to save the image. Default: .bfcode/generated/<timestamp>.png"}
+                    },
+                    "required": ["prompt"]
+                }),
+            },
+        });
+    }
+
+    tools
 }
 
 /// Permission tracker for tool execution (like opencode's permission system)
@@ -1060,9 +1072,13 @@ async fn exec_webfetch(arguments: &str) -> Result<String> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .redirect(reqwest::redirect::Policy::limited(5))
+        .user_agent("Mozilla/5.0 (compatible; bfcode/0.6.0; +https://github.com/user/bfcode)")
         .build()?;
 
-    let response = client.get(&args.url).send().await
+    let response = client.get(&args.url)
+        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+        .header("Accept-Language", "en-US,en;q=0.5")
+        .send().await
         .with_context(|| format!("Failed to fetch {}", args.url))?;
 
     let status = response.status();
@@ -1887,7 +1903,8 @@ mod tests {
     #[test]
     fn test_tool_definitions_count() {
         let defs = get_tool_definitions();
-        assert_eq!(defs.len(), 23);
+        // Base: 21 tools, +1 if BRAVE/TAVILY key set, +1 if OPENAI key set
+        assert!(defs.len() >= 21 && defs.len() <= 23);
     }
 
     #[test]
