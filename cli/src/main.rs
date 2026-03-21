@@ -1,6 +1,8 @@
 mod api;
 mod context;
 mod persistence;
+#[cfg(test)]
+mod test_utils;
 mod tools;
 mod types;
 
@@ -61,6 +63,10 @@ enum Commands {
     #[command(subcommand)]
     Context(ContextCommands),
 
+    /// Manage context memory (.bfcode/memory/*.md)
+    #[command(subcommand)]
+    Memory(MemoryCommands),
+
     /// Undo last file change(s)
     Undo {
         /// Number of changes to undo (default 1)
@@ -102,6 +108,39 @@ enum PlanCommands {
 }
 
 #[derive(Subcommand)]
+enum MemoryCommands {
+    /// List all saved memories
+    List,
+    /// Show a specific memory by name
+    Show {
+        /// Memory name
+        name: String,
+    },
+    /// Save a new memory markdown file
+    Save {
+        /// Memory name (used as filename)
+        name: String,
+        /// One-line description
+        #[arg(short, long)]
+        description: Option<String>,
+        /// Memory type: user, feedback, project, reference
+        #[arg(short = 't', long, default_value = "project")]
+        memory_type: String,
+        /// Content (if not provided, reads from stdin)
+        #[arg(short, long)]
+        content: Option<String>,
+        /// Folder to save in (default: .bfcode/memory/)
+        #[arg(short, long)]
+        folder: Option<String>,
+    },
+    /// Delete a memory by name
+    Delete {
+        /// Memory name
+        name: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum ContextCommands {
     /// Generate environment context snapshot (.bfcode/context/environment.md)
     Env,
@@ -137,6 +176,7 @@ async fn main() -> Result<()> {
         Some(Commands::Plan(cmd)) => run_plan_command(cmd),
         Some(Commands::Config) => run_config(),
         Some(Commands::Context(cmd)) => run_context_command(cmd),
+        Some(Commands::Memory(cmd)) => run_memory_command(cmd),
         Some(Commands::Undo { count }) => run_undo(count),
     }
 }
@@ -377,6 +417,101 @@ fn run_context_command(cmd: ContextCommands) -> Result<()> {
     }
 }
 
+fn run_memory_command(cmd: MemoryCommands) -> Result<()> {
+    match cmd {
+        MemoryCommands::List => {
+            let memories = persistence::list_memories();
+            if memories.is_empty() {
+                println!(
+                    "{}",
+                    "No memories saved. Use `bfcode memory save <name>` to create one.".dimmed()
+                );
+            } else {
+                println!("{}", "Context Memories:".yellow().bold());
+                for (name, desc, mtype, size) in &memories {
+                    let desc_part = if desc.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" — {}", desc.dimmed())
+                    };
+                    println!(
+                        "  {} [{}] ({}){}",
+                        name.cyan(),
+                        mtype,
+                        format_size(*size).dimmed(),
+                        desc_part
+                    );
+                }
+            }
+            Ok(())
+        }
+        MemoryCommands::Show { name } => {
+            match persistence::load_memory(&name) {
+                Some(mem) => {
+                    println!("{} [{}]", mem.name.cyan().bold(), mem.memory_type);
+                    if !mem.description.is_empty() {
+                        println!("{}", mem.description.dimmed());
+                    }
+                    println!("---");
+                    println!("{}", mem.content);
+                }
+                None => println!("{}", format!("Memory '{}' not found.", name).red()),
+            }
+            Ok(())
+        }
+        MemoryCommands::Save {
+            name,
+            description,
+            memory_type,
+            content,
+            folder,
+        } => {
+            let mtype = match memory_type.as_str() {
+                "user" => types::MemoryType::User,
+                "feedback" => types::MemoryType::Feedback,
+                "reference" => types::MemoryType::Reference,
+                _ => types::MemoryType::Project,
+            };
+
+            let body = match content {
+                Some(c) => c,
+                None => {
+                    // Read from stdin
+                    println!("{}", "Enter memory content (Ctrl+D to finish):".dimmed());
+                    let mut buf = String::new();
+                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
+                    buf
+                }
+            };
+
+            let mem = types::ContextMemory {
+                name: name.clone(),
+                description: description.unwrap_or_default(),
+                memory_type: mtype,
+                content: body,
+            };
+
+            let path = if let Some(ref folder) = folder {
+                persistence::save_memory_to(&mem, folder)?
+            } else {
+                persistence::save_memory(&mem)?
+            };
+            println!(
+                "{}",
+                format!("Memory saved: {}", path.display()).green()
+            );
+            Ok(())
+        }
+        MemoryCommands::Delete { name } => {
+            match persistence::delete_memory(&name)? {
+                true => println!("{}", format!("Deleted memory '{name}'.").green()),
+                false => println!("{}", format!("Memory '{name}' not found.").yellow()),
+            }
+            Ok(())
+        }
+    }
+}
+
 fn format_size(bytes: u64) -> String {
     if bytes >= 1024 * 1024 {
         format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
@@ -441,7 +576,10 @@ async fn run_interactive(initial_message: Option<String>) -> Result<()> {
     // Load context markdown files (.bfcode/context/*.md)
     let context_files = context::load_context_files();
 
-    // Build full system prompt = base + instructions + plans + context
+    // Load context memories (.bfcode/memory/*.md)
+    let memories_context = persistence::load_memories_context();
+
+    // Build full system prompt = base + instructions + plans + context + memories
     let mut full_system_prompt = config.system_prompt.clone();
     if let Some(ref instr) = instructions {
         full_system_prompt.push_str(instr);
@@ -451,6 +589,9 @@ async fn run_interactive(initial_message: Option<String>) -> Result<()> {
     }
     if let Some(ref ctx) = context_files {
         full_system_prompt.push_str(&format!("\n# Context\n{ctx}"));
+    }
+    if let Some(ref mem) = memories_context {
+        full_system_prompt.push_str(mem);
     }
 
     // Ensure system prompt is first message
@@ -1001,32 +1142,15 @@ fn compact_conversation(session: &mut ProjectSession, full_system_prompt: &str) 
 mod tests {
     use super::*;
     use crate::api::MockClient;
-    use std::sync::Mutex;
+    use crate::test_utils;
 
-    static CWD_LOCK: Mutex<()> = Mutex::new(());
-
-    /// Run a closure in a temp dir, holding the cwd lock
+    /// Run a closure in a temp dir, holding the global cwd lock
     fn with_tmp<F, R>(f: F) -> R
     where
         F: FnOnce() -> R,
     {
-        let _lock = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let tmp = std::env::temp_dir().join(format!(
-            "bfcode_main_test_{}_{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
-        let original = std::env::current_dir().unwrap();
-        std::env::set_current_dir(&tmp).unwrap();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-        std::env::set_current_dir(&original).unwrap();
-        let _ = std::fs::remove_dir_all(&tmp);
-        match result {
-            Ok(r) => r,
-            Err(e) => std::panic::resume_unwind(e),
-        }
+        let tmp = test_utils::tmp_dir("main");
+        test_utils::with_cwd(&tmp, f)
     }
 
     /// Helper: create a minimal session
@@ -1044,10 +1168,9 @@ mod tests {
         F: FnOnce() -> Fut + Send,
         Fut: std::future::Future<Output = ()>,
     {
-        // We need to set cwd before the async work, so use a sync lock
-        let _lock = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = test_utils::CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = std::env::temp_dir().join(format!(
-            "bfcode_main_test_{}_{:?}",
+            "bfcode_test_main_async_{}_{:?}",
             std::process::id(),
             std::thread::current().id()
         ));

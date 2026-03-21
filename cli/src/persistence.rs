@@ -1,4 +1,4 @@
-use crate::types::{FileSnapshot, GlobalConfig, INSTRUCTION_FILES, ProjectSession};
+use crate::types::{ContextMemory, FileSnapshot, GlobalConfig, MemoryType, INSTRUCTION_FILES, ProjectSession};
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
@@ -347,6 +347,247 @@ pub fn snapshot_count(session_id: &str) -> usize {
     load_snapshot_index(session_id).len()
 }
 
+// --- Context Memory: .bfcode/memory/*.md ---
+// Markdown files with JSON frontmatter for persistent context across sessions.
+
+fn memory_dir() -> PathBuf {
+    project_dir().join("memory")
+}
+
+/// Slugify a name for use as a filename
+fn slugify(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' {
+                c.to_ascii_lowercase()
+            } else if c == ' ' || c == '_' {
+                '-'
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+/// Save a context memory as a markdown file with JSON frontmatter.
+/// File: .bfcode/memory/{slugified-name}.md
+///
+/// Format:
+/// ```
+/// ---json
+/// {"name":"...","description":"...","type":"..."}
+/// ---
+/// (markdown content)
+/// ```
+pub fn save_memory(memory: &ContextMemory) -> Result<PathBuf> {
+    let dir = memory_dir();
+    std::fs::create_dir_all(&dir)?;
+
+    // Ensure .bfcode/.gitignore includes memory/
+    let gitignore = project_dir().join(".gitignore");
+    if gitignore.exists() {
+        let content = std::fs::read_to_string(&gitignore).unwrap_or_default();
+        if !content.contains("memory/") {
+            std::fs::write(&gitignore, format!("{content}memory/\n"))?;
+        }
+    }
+
+    let slug = slugify(&memory.name);
+    let filename = format!("{slug}.md");
+    let path = dir.join(&filename);
+
+    // Build markdown with JSON frontmatter
+    let frontmatter = serde_json::json!({
+        "name": memory.name,
+        "description": memory.description,
+        "type": memory.memory_type,
+    });
+    let md = format!(
+        "---json\n{}\n---\n\n{}\n",
+        serde_json::to_string_pretty(&frontmatter)?,
+        memory.content
+    );
+
+    std::fs::write(&path, &md)?;
+    Ok(path)
+}
+
+/// Save a context memory to a specific folder (instead of default .bfcode/memory/)
+pub fn save_memory_to(memory: &ContextMemory, folder: &str) -> Result<PathBuf> {
+    let dir = PathBuf::from(folder);
+    std::fs::create_dir_all(&dir)?;
+
+    let slug = slugify(&memory.name);
+    let filename = format!("{slug}.md");
+    let path = dir.join(&filename);
+
+    let frontmatter = serde_json::json!({
+        "name": memory.name,
+        "description": memory.description,
+        "type": memory.memory_type,
+    });
+    let md = format!(
+        "---json\n{}\n---\n\n{}\n",
+        serde_json::to_string_pretty(&frontmatter)?,
+        memory.content
+    );
+
+    std::fs::write(&path, &md)?;
+    Ok(path)
+}
+
+/// Parse a memory markdown file: extract JSON frontmatter + body
+fn parse_memory_file(content: &str) -> Option<ContextMemory> {
+    let content = content.trim();
+    if !content.starts_with("---json") {
+        // No frontmatter — treat entire file as content with filename as name
+        return None;
+    }
+
+    // Find closing ---
+    let after_open = &content["---json".len()..];
+    let close_idx = after_open.find("\n---")?;
+    let json_str = after_open[..close_idx].trim();
+    let body = after_open[close_idx + "\n---".len()..].trim();
+
+    let meta: serde_json::Value = serde_json::from_str(json_str).ok()?;
+
+    let name = meta.get("name")?.as_str()?.to_string();
+    let description = meta.get("description")?.as_str().unwrap_or("").to_string();
+    let type_str = meta.get("type")?.as_str().unwrap_or("project");
+    let memory_type = match type_str {
+        "user" => MemoryType::User,
+        "feedback" => MemoryType::Feedback,
+        "reference" => MemoryType::Reference,
+        _ => MemoryType::Project,
+    };
+
+    Some(ContextMemory {
+        name,
+        description,
+        memory_type,
+        content: body.to_string(),
+    })
+}
+
+/// Load a single memory by name
+pub fn load_memory(name: &str) -> Option<ContextMemory> {
+    let slug = slugify(name);
+    let path = memory_dir().join(format!("{slug}.md"));
+    if !path.exists() {
+        return None;
+    }
+    let content = std::fs::read_to_string(&path).ok()?;
+    parse_memory_file(&content)
+}
+
+/// List all memories: returns Vec<(name, description, type, file_size)>
+pub fn list_memories() -> Vec<(String, String, String, u64)> {
+    let dir = memory_dir();
+    if !dir.exists() {
+        return vec![];
+    }
+
+    let mut memories = vec![];
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().map(|e| e == "md").unwrap_or(false) {
+                let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    if let Some(mem) = parse_memory_file(&content) {
+                        memories.push((
+                            mem.name,
+                            mem.description,
+                            mem.memory_type.to_string(),
+                            size,
+                        ));
+                    } else {
+                        // Plain markdown without frontmatter
+                        let name = path
+                            .file_stem()
+                            .map(|s| s.to_string_lossy().to_string())
+                            .unwrap_or_default();
+                        memories.push((name, String::new(), "project".into(), size));
+                    }
+                }
+            }
+        }
+    }
+
+    memories.sort_by(|a, b| a.0.cmp(&b.0));
+    memories
+}
+
+/// Delete a memory by name
+pub fn delete_memory(name: &str) -> Result<bool> {
+    let slug = slugify(name);
+    let path = memory_dir().join(format!("{slug}.md"));
+    if path.exists() {
+        std::fs::remove_file(&path)?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+/// Load all memories and combine them as context for system prompt injection.
+/// Returns None if no memories exist.
+pub fn load_memories_context() -> Option<String> {
+    let dir = memory_dir();
+    if !dir.exists() {
+        return None;
+    }
+
+    let mut context = String::new();
+    let mut entries: Vec<_> = std::fs::read_dir(&dir)
+        .ok()?
+        .flatten()
+        .filter(|e| {
+            e.path()
+                .extension()
+                .map(|ext| ext == "md")
+                .unwrap_or(false)
+        })
+        .collect();
+
+    entries.sort_by_key(|e| e.file_name());
+
+    for entry in entries {
+        let path = entry.path();
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            // Cap total memory context at 30KB
+            if !context.is_empty() && context.len() + content.len() > 30_000 {
+                break;
+            }
+
+            if let Some(mem) = parse_memory_file(&content) {
+                context.push_str(&format!(
+                    "\n## {} ({})\n{}\n",
+                    mem.name, mem.memory_type, mem.content
+                ));
+            } else {
+                // Plain markdown — include as-is
+                let name = path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                context.push_str(&format!("\n## {name}\n{content}\n"));
+            }
+        }
+    }
+
+    if context.is_empty() {
+        None
+    } else {
+        Some(format!("\n# Context Memory (.bfcode/memory/)\n{context}"))
+    }
+}
+
 // --- Helpers ---
 
 fn atomic_write<T: serde::Serialize>(target: &PathBuf, data: &T) -> Result<()> {
@@ -360,34 +601,7 @@ fn atomic_write<T: serde::Serialize>(target: &PathBuf, data: &T) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    static CWD_LOCK: Mutex<()> = Mutex::new(());
-
-    fn with_cwd<F, R>(dir: &Path, f: F) -> R
-    where
-        F: FnOnce() -> R,
-    {
-        let _lock = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let original = std::env::current_dir().unwrap();
-        std::env::set_current_dir(dir).unwrap();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-        std::env::set_current_dir(&original).unwrap();
-        match result {
-            Ok(r) => r,
-            Err(e) => std::panic::resume_unwind(e),
-        }
-    }
-
-    fn tmp_dir(name: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!(
-            "bfcode_persist_test_{name}_{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&path);
-        std::fs::create_dir_all(&path).unwrap();
-        path
-    }
+    use crate::test_utils::{with_cwd, tmp_dir};
 
     // ── Snapshot save/load round-trip ─────────────────────────────────
 
@@ -593,5 +807,499 @@ mod tests {
             assert_eq!(loaded[0].original_content, content);
         });
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ── Slugify ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_slugify_simple() {
+        assert_eq!(slugify("hello world"), "hello-world");
+    }
+
+    #[test]
+    fn test_slugify_special_chars() {
+        assert_eq!(slugify("API Endpoint Notes!"), "api-endpoint-notes");
+    }
+
+    #[test]
+    fn test_slugify_underscores() {
+        assert_eq!(slugify("my_memory_name"), "my-memory-name");
+    }
+
+    #[test]
+    fn test_slugify_multiple_dashes() {
+        assert_eq!(slugify("hello---world"), "hello-world");
+    }
+
+    #[test]
+    fn test_slugify_already_clean() {
+        assert_eq!(slugify("clean-name"), "clean-name");
+    }
+
+    // ── parse_memory_file ───────────────────────────────────────────
+
+    #[test]
+    fn test_parse_memory_file_valid() {
+        let content = r#"---json
+{
+  "name": "test-memory",
+  "description": "A test memory",
+  "type": "project"
+}
+---
+
+This is the memory content.
+
+It can have **multiple** lines.
+"#;
+        let mem = parse_memory_file(content).unwrap();
+        assert_eq!(mem.name, "test-memory");
+        assert_eq!(mem.description, "A test memory");
+        assert_eq!(mem.memory_type, MemoryType::Project);
+        assert!(mem.content.contains("multiple"));
+    }
+
+    #[test]
+    fn test_parse_memory_file_user_type() {
+        let content = r#"---json
+{"name":"user-pref","description":"User prefers Rust","type":"user"}
+---
+
+Senior Rust developer.
+"#;
+        let mem = parse_memory_file(content).unwrap();
+        assert_eq!(mem.memory_type, MemoryType::User);
+    }
+
+    #[test]
+    fn test_parse_memory_file_feedback_type() {
+        let content = r#"---json
+{"name":"no-mocks","description":"Don't mock DB","type":"feedback"}
+---
+
+Use real database in integration tests.
+"#;
+        let mem = parse_memory_file(content).unwrap();
+        assert_eq!(mem.memory_type, MemoryType::Feedback);
+    }
+
+    #[test]
+    fn test_parse_memory_file_reference_type() {
+        let content = r#"---json
+{"name":"linear","description":"Bug tracker","type":"reference"}
+---
+
+Bugs tracked in Linear project INGEST.
+"#;
+        let mem = parse_memory_file(content).unwrap();
+        assert_eq!(mem.memory_type, MemoryType::Reference);
+    }
+
+    #[test]
+    fn test_parse_memory_file_unknown_type_defaults_to_project() {
+        let content = r#"---json
+{"name":"x","description":"","type":"unknown"}
+---
+
+content
+"#;
+        let mem = parse_memory_file(content).unwrap();
+        assert_eq!(mem.memory_type, MemoryType::Project);
+    }
+
+    #[test]
+    fn test_parse_memory_file_no_frontmatter() {
+        let content = "Just plain markdown content.";
+        assert!(parse_memory_file(content).is_none());
+    }
+
+    #[test]
+    fn test_parse_memory_file_invalid_json() {
+        let content = "---json\n{invalid json}\n---\n\ncontent";
+        assert!(parse_memory_file(content).is_none());
+    }
+
+    #[test]
+    fn test_parse_memory_file_missing_name() {
+        let content = r#"---json
+{"description":"no name","type":"project"}
+---
+
+content
+"#;
+        assert!(parse_memory_file(content).is_none());
+    }
+
+    #[test]
+    fn test_parse_memory_file_empty_body() {
+        let content = r#"---json
+{"name":"empty","description":"","type":"project"}
+---
+"#;
+        let mem = parse_memory_file(content).unwrap();
+        assert_eq!(mem.name, "empty");
+        assert!(mem.content.is_empty());
+    }
+
+    // ── save_memory + load_memory round-trip ────────────────────────
+
+    #[test]
+    fn test_save_and_load_memory() {
+        let tmp = tmp_dir("mem_save_load");
+        with_cwd(&tmp, || {
+            let mem = ContextMemory {
+                name: "test memory".into(),
+                description: "A test".into(),
+                memory_type: MemoryType::Project,
+                content: "Some important context.".into(),
+            };
+            let path = save_memory(&mem).unwrap();
+            assert!(path.exists());
+            assert!(path.to_string_lossy().contains("test-memory.md"));
+
+            let loaded = load_memory("test memory").unwrap();
+            assert_eq!(loaded.name, "test memory");
+            assert_eq!(loaded.description, "A test");
+            assert_eq!(loaded.memory_type, MemoryType::Project);
+            assert_eq!(loaded.content, "Some important context.");
+        });
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_save_memory_creates_directory() {
+        let tmp = tmp_dir("mem_mkdir");
+        with_cwd(&tmp, || {
+            let mem = ContextMemory {
+                name: "first".into(),
+                description: "".into(),
+                memory_type: MemoryType::User,
+                content: "hello".into(),
+            };
+            save_memory(&mem).unwrap();
+            assert!(tmp.join(".bfcode").join("memory").exists());
+        });
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_save_memory_overwrites_existing() {
+        let tmp = tmp_dir("mem_overwrite");
+        with_cwd(&tmp, || {
+            let mem1 = ContextMemory {
+                name: "note".into(),
+                description: "v1".into(),
+                memory_type: MemoryType::Project,
+                content: "version 1".into(),
+            };
+            save_memory(&mem1).unwrap();
+
+            let mem2 = ContextMemory {
+                name: "note".into(),
+                description: "v2".into(),
+                memory_type: MemoryType::Project,
+                content: "version 2".into(),
+            };
+            save_memory(&mem2).unwrap();
+
+            let loaded = load_memory("note").unwrap();
+            assert_eq!(loaded.description, "v2");
+            assert_eq!(loaded.content, "version 2");
+        });
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ── save_memory_to (custom folder) ──────────────────────────────
+
+    #[test]
+    fn test_save_memory_to_custom_folder() {
+        let tmp = tmp_dir("mem_custom_folder");
+        let folder = tmp.join("src").join("notes");
+        let mem = ContextMemory {
+            name: "auth notes".into(),
+            description: "About auth".into(),
+            memory_type: MemoryType::Project,
+            content: "JWT based auth.".into(),
+        };
+        let path = save_memory_to(&mem, &folder.to_string_lossy()).unwrap();
+        assert!(path.exists());
+        assert!(path.to_string_lossy().contains("auth-notes.md"));
+
+        // Verify we can read it back
+        let content = std::fs::read_to_string(&path).unwrap();
+        let parsed = parse_memory_file(&content).unwrap();
+        assert_eq!(parsed.name, "auth notes");
+        assert_eq!(parsed.content, "JWT based auth.");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ── load_memory not found ───────────────────────────────────────
+
+    #[test]
+    fn test_load_memory_not_found() {
+        let tmp = tmp_dir("mem_not_found");
+        with_cwd(&tmp, || {
+            assert!(load_memory("nonexistent").is_none());
+        });
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ── list_memories ───────────────────────────────────────────────
+
+    #[test]
+    fn test_list_memories_empty() {
+        let tmp = tmp_dir("mem_list_empty");
+        with_cwd(&tmp, || {
+            let list = list_memories();
+            assert!(list.is_empty());
+        });
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_list_memories_multiple() {
+        let tmp = tmp_dir("mem_list_multi");
+        with_cwd(&tmp, || {
+            for (name, mtype) in [
+                ("alpha", MemoryType::User),
+                ("beta", MemoryType::Feedback),
+                ("gamma", MemoryType::Project),
+            ] {
+                save_memory(&ContextMemory {
+                    name: name.into(),
+                    description: format!("desc {name}"),
+                    memory_type: mtype,
+                    content: format!("content {name}"),
+                })
+                .unwrap();
+            }
+
+            let list = list_memories();
+            assert_eq!(list.len(), 3);
+            // Sorted alphabetically by name
+            assert_eq!(list[0].0, "alpha");
+            assert_eq!(list[1].0, "beta");
+            assert_eq!(list[2].0, "gamma");
+            // Check types
+            assert_eq!(list[0].2, "user");
+            assert_eq!(list[1].2, "feedback");
+            assert_eq!(list[2].2, "project");
+        });
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_list_memories_includes_plain_markdown() {
+        let tmp = tmp_dir("mem_list_plain");
+        with_cwd(&tmp, || {
+            let dir = tmp.join(".bfcode").join("memory");
+            std::fs::create_dir_all(&dir).unwrap();
+            // Write a plain markdown file without frontmatter
+            std::fs::write(dir.join("manual-note.md"), "Just a plain note.").unwrap();
+
+            let list = list_memories();
+            assert_eq!(list.len(), 1);
+            assert_eq!(list[0].0, "manual-note");
+            assert_eq!(list[0].2, "project"); // defaults to project
+        });
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ── delete_memory ───────────────────────────────────────────────
+
+    #[test]
+    fn test_delete_memory_existing() {
+        let tmp = tmp_dir("mem_delete");
+        with_cwd(&tmp, || {
+            save_memory(&ContextMemory {
+                name: "to-delete".into(),
+                description: "".into(),
+                memory_type: MemoryType::Project,
+                content: "bye".into(),
+            })
+            .unwrap();
+
+            assert!(load_memory("to-delete").is_some());
+            assert!(delete_memory("to-delete").unwrap());
+            assert!(load_memory("to-delete").is_none());
+        });
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_delete_memory_nonexistent() {
+        let tmp = tmp_dir("mem_delete_none");
+        with_cwd(&tmp, || {
+            assert!(!delete_memory("nope").unwrap());
+        });
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ── load_memories_context ───────────────────────────────────────
+
+    #[test]
+    fn test_load_memories_context_empty() {
+        let tmp = tmp_dir("mem_ctx_empty");
+        with_cwd(&tmp, || {
+            assert!(load_memories_context().is_none());
+        });
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_load_memories_context_with_memories() {
+        let tmp = tmp_dir("mem_ctx_loaded");
+        with_cwd(&tmp, || {
+            save_memory(&ContextMemory {
+                name: "api-notes".into(),
+                description: "API structure".into(),
+                memory_type: MemoryType::Project,
+                content: "REST API uses /v1 prefix.".into(),
+            })
+            .unwrap();
+            save_memory(&ContextMemory {
+                name: "user-pref".into(),
+                description: "User is a Rust dev".into(),
+                memory_type: MemoryType::User,
+                content: "Senior Rust developer.".into(),
+            })
+            .unwrap();
+
+            let ctx = load_memories_context().unwrap();
+            assert!(ctx.contains("Context Memory"));
+            assert!(ctx.contains("api-notes"));
+            assert!(ctx.contains("REST API uses /v1 prefix."));
+            assert!(ctx.contains("user-pref"));
+            assert!(ctx.contains("Senior Rust developer."));
+        });
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_load_memories_context_includes_plain_md() {
+        let tmp = tmp_dir("mem_ctx_plain");
+        with_cwd(&tmp, || {
+            let dir = tmp.join(".bfcode").join("memory");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("notes.md"), "Plain notes here.").unwrap();
+
+            let ctx = load_memories_context().unwrap();
+            assert!(ctx.contains("notes"));
+            assert!(ctx.contains("Plain notes here."));
+        });
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_load_memories_context_respects_size_limit() {
+        let tmp = tmp_dir("mem_ctx_limit");
+        with_cwd(&tmp, || {
+            // Create two large memories that together exceed the 30KB limit
+            let big_content_1 = "x".repeat(20_000);
+            save_memory(&ContextMemory {
+                name: "aaa-big1".into(),
+                description: "".into(),
+                memory_type: MemoryType::Project,
+                content: big_content_1,
+            })
+            .unwrap();
+            let big_content_2 = "y".repeat(20_000);
+            save_memory(&ContextMemory {
+                name: "zzz-big2".into(),
+                description: "".into(),
+                memory_type: MemoryType::Project,
+                content: big_content_2,
+            })
+            .unwrap();
+
+            let ctx = load_memories_context().unwrap();
+            // The first one should be included
+            assert!(ctx.contains("aaa-big1"));
+            // The second one should be skipped (total > 30KB)
+            assert!(!ctx.contains("zzz-big2"));
+        });
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ── Memory markdown file format ─────────────────────────────────
+
+    #[test]
+    fn test_memory_file_format_has_json_frontmatter() {
+        let tmp = tmp_dir("mem_format");
+        with_cwd(&tmp, || {
+            save_memory(&ContextMemory {
+                name: "format check".into(),
+                description: "Checking format".into(),
+                memory_type: MemoryType::Feedback,
+                content: "Don't mock the database.".into(),
+            })
+            .unwrap();
+
+            let path = tmp.join(".bfcode").join("memory").join("format-check.md");
+            let raw = std::fs::read_to_string(&path).unwrap();
+            assert!(raw.starts_with("---json\n"));
+            assert!(raw.contains("\"name\": \"format check\""));
+            assert!(raw.contains("\"type\": \"feedback\""));
+            assert!(raw.contains("Don't mock the database."));
+        });
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_memory_roundtrip_all_types() {
+        let tmp = tmp_dir("mem_roundtrip_types");
+        with_cwd(&tmp, || {
+            for (name, mtype, expected_str) in [
+                ("u", MemoryType::User, "user"),
+                ("f", MemoryType::Feedback, "feedback"),
+                ("p", MemoryType::Project, "project"),
+                ("r", MemoryType::Reference, "reference"),
+            ] {
+                save_memory(&ContextMemory {
+                    name: name.into(),
+                    description: "".into(),
+                    memory_type: mtype.clone(),
+                    content: "test".into(),
+                })
+                .unwrap();
+                let loaded = load_memory(name).unwrap();
+                assert_eq!(loaded.memory_type, mtype);
+                assert_eq!(loaded.memory_type.to_string(), expected_str);
+            }
+        });
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ── JSON serialization of ContextMemory ─────────────────────────
+
+    #[test]
+    fn test_context_memory_json_roundtrip() {
+        let mem = ContextMemory {
+            name: "test".into(),
+            description: "desc".into(),
+            memory_type: MemoryType::Feedback,
+            content: "content".into(),
+        };
+        let json = serde_json::to_string(&mem).unwrap();
+        let parsed: ContextMemory = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.name, "test");
+        assert_eq!(parsed.memory_type, MemoryType::Feedback);
+    }
+
+    #[test]
+    fn test_memory_type_json_serialization() {
+        assert_eq!(serde_json::to_string(&MemoryType::User).unwrap(), "\"user\"");
+        assert_eq!(serde_json::to_string(&MemoryType::Feedback).unwrap(), "\"feedback\"");
+        assert_eq!(serde_json::to_string(&MemoryType::Project).unwrap(), "\"project\"");
+        assert_eq!(serde_json::to_string(&MemoryType::Reference).unwrap(), "\"reference\"");
+    }
+
+    #[test]
+    fn test_memory_type_json_deserialization() {
+        let u: MemoryType = serde_json::from_str("\"user\"").unwrap();
+        assert_eq!(u, MemoryType::User);
+        let f: MemoryType = serde_json::from_str("\"feedback\"").unwrap();
+        assert_eq!(f, MemoryType::Feedback);
     }
 }

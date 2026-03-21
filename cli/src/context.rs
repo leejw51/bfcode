@@ -511,26 +511,16 @@ fn get_project_tree() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::with_cwd;
     use crate::types::{FunctionCall, ToolCall};
     use std::fs;
-    use std::sync::Mutex;
-
-    /// Global lock for tests that need to change the working directory.
-    /// Rust tests run in parallel, but cwd is process-global.
-    static CWD_LOCK: Mutex<()> = Mutex::new(());
 
     /// Helper: create a temp dir that is cleaned up on drop
     struct TempDir(PathBuf);
 
     impl TempDir {
         fn new(name: &str) -> Self {
-            let path = std::env::temp_dir().join(format!(
-                "bfcode_test_{name}_{}_{}",
-                std::process::id(),
-                format!("{:?}", std::thread::current().id()).replace("ThreadId(", "").replace(")", "")
-            ));
-            let _ = fs::remove_dir_all(&path);
-            fs::create_dir_all(&path).unwrap();
+            let path = crate::test_utils::tmp_dir(name);
             Self(path)
         }
 
@@ -542,22 +532,6 @@ mod tests {
     impl Drop for TempDir {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
-    /// Run a closure with cwd set to the given path, holding CWD_LOCK.
-    fn with_cwd<F, R>(dir: &Path, f: F) -> R
-    where
-        F: FnOnce() -> R,
-    {
-        let _lock = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let original = std::env::current_dir().unwrap();
-        std::env::set_current_dir(dir).unwrap();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
-        std::env::set_current_dir(&original).unwrap();
-        match result {
-            Ok(r) => r,
-            Err(e) => std::panic::resume_unwind(e),
         }
     }
 

@@ -135,6 +135,49 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                 }),
             },
         },
+        ToolDefinition {
+            tool_type: "function".into(),
+            function: FunctionSchema {
+                name: "memory_save".into(),
+                description: "Save a context memory as a markdown file. Saved to .bfcode/memory/ by default, or to a specific folder. Use this to remember important context across sessions.".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "Memory name (used as filename slug)"},
+                        "description": {"type": "string", "description": "One-line summary of what this memory is about"},
+                        "memory_type": {"type": "string", "enum": ["user", "feedback", "project", "reference"], "description": "Memory type"},
+                        "content": {"type": "string", "description": "Markdown content of the memory"},
+                        "folder": {"type": "string", "description": "Optional folder to save in (default: .bfcode/memory/)"}
+                    },
+                    "required": ["name", "description", "memory_type", "content"]
+                }),
+            },
+        },
+        ToolDefinition {
+            tool_type: "function".into(),
+            function: FunctionSchema {
+                name: "memory_delete".into(),
+                description: "Delete a context memory by name from .bfcode/memory/.".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "Memory name to delete"}
+                    },
+                    "required": ["name"]
+                }),
+            },
+        },
+        ToolDefinition {
+            tool_type: "function".into(),
+            function: FunctionSchema {
+                name: "memory_list".into(),
+                description: "List all saved context memories in .bfcode/memory/.".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+            },
+        },
     ]
 }
 
@@ -217,7 +260,7 @@ pub async fn execute_tool(
     session_id: &str,
 ) -> String {
     // Check permissions for dangerous tools
-    let needs_permission = matches!(name, "bash" | "write" | "edit" | "apply_patch");
+    let needs_permission = matches!(name, "bash" | "write" | "edit" | "apply_patch" | "memory_save" | "memory_delete");
     if needs_permission {
         let summary = tool_permission_summary(name, arguments);
         match permissions.ask_permission(name, &summary) {
@@ -239,6 +282,9 @@ pub async fn execute_tool(
         "grep" => exec_grep(arguments).await,
         "list_files" => exec_list_files(arguments).await,
         "apply_patch" => exec_apply_patch(arguments, session_id).await,
+        "memory_save" => exec_memory_save(arguments).await,
+        "memory_delete" => exec_memory_delete(arguments).await,
+        "memory_list" => exec_memory_list().await,
         _ => Err(anyhow::anyhow!("Unknown tool: {name}")),
     };
 
@@ -310,6 +356,12 @@ pub fn print_tool_call(name: &str, arguments: &str) {
                 format!("\"{pattern}\" in {path}")
             }
             "list_files" => v["path"].as_str().unwrap_or("").to_string(),
+            "memory_save" => {
+                let name = v["name"].as_str().unwrap_or("");
+                let folder = v["folder"].as_str().unwrap_or(".bfcode/memory/");
+                format!("{name} -> {folder}")
+            }
+            "memory_delete" => v["name"].as_str().unwrap_or("").to_string(),
             _ => arguments.to_string(),
         },
         Err(_) => arguments.to_string(),
@@ -651,6 +703,59 @@ async fn exec_list_files(arguments: &str) -> Result<String> {
     Ok(entries.join("\n"))
 }
 
+// --- Memory Tools ---
+
+async fn exec_memory_save(arguments: &str) -> Result<String> {
+    let args: MemorySaveArgs = serde_json::from_str(arguments)?;
+
+    let memory = crate::types::ContextMemory {
+        name: args.name.clone(),
+        description: args.description,
+        memory_type: args.memory_type,
+        content: args.content,
+    };
+
+    // Check for optional folder field
+    let folder: Option<String> = serde_json::from_str::<serde_json::Value>(arguments)
+        .ok()
+        .and_then(|v| v.get("folder")?.as_str().map(|s| s.to_string()));
+
+    let path = if let Some(ref folder) = folder {
+        crate::persistence::save_memory_to(&memory, folder)?
+    } else {
+        crate::persistence::save_memory(&memory)?
+    };
+
+    Ok(format!("Memory '{}' saved to {}", args.name, path.display()))
+}
+
+async fn exec_memory_delete(arguments: &str) -> Result<String> {
+    let args: MemoryDeleteArgs = serde_json::from_str(arguments)?;
+
+    match crate::persistence::delete_memory(&args.name)? {
+        true => Ok(format!("Deleted memory '{}'.", args.name)),
+        false => Ok(format!("Memory '{}' not found.", args.name)),
+    }
+}
+
+async fn exec_memory_list() -> Result<String> {
+    let memories = crate::persistence::list_memories();
+    if memories.is_empty() {
+        return Ok("No memories saved.".to_string());
+    }
+
+    let mut output = String::from("Saved memories:\n");
+    for (name, desc, mtype, size) in &memories {
+        let desc_part = if desc.is_empty() {
+            String::new()
+        } else {
+            format!(" — {desc}")
+        };
+        output.push_str(&format!("  - {name} [{mtype}] ({size} bytes){desc_part}\n"));
+    }
+    Ok(output)
+}
+
 // --- File Snapshot Helper ---
 
 /// Save a snapshot of a file before modification (for undo support)
@@ -984,7 +1089,7 @@ mod tests {
     #[test]
     fn test_tool_definitions_count() {
         let defs = get_tool_definitions();
-        assert_eq!(defs.len(), 8);
+        assert_eq!(defs.len(), 11);
     }
 
     #[test]

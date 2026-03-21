@@ -376,6 +376,38 @@ impl ProjectSession {
     }
 }
 
+/// Memory type for context memories (like Claude Code's memory system)
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum MemoryType {
+    User,
+    Feedback,
+    Project,
+    Reference,
+}
+
+impl std::fmt::Display for MemoryType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MemoryType::User => write!(f, "user"),
+            MemoryType::Feedback => write!(f, "feedback"),
+            MemoryType::Project => write!(f, "project"),
+            MemoryType::Reference => write!(f, "reference"),
+        }
+    }
+}
+
+/// A context memory entry stored as a markdown file in .bfcode/memory/
+/// Frontmatter is JSON, body is markdown content.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ContextMemory {
+    pub name: String,
+    pub description: String,
+    #[serde(rename = "type")]
+    pub memory_type: MemoryType,
+    pub content: String,
+}
+
 /// File snapshot for undo/revert
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct FileSnapshot {
@@ -396,6 +428,9 @@ pub const SYSTEM_PROMPT: &str = r#"You are bfcode (back to the future code), a c
 - glob: Find files matching a glob pattern (e.g. "**/*.rs", "src/**/*.ts").
 - grep: Search file contents with regex pattern. Returns matching lines with line numbers.
 - list_files: List files and directories at a path.
+- memory_save: Save a context memory as a markdown file in .bfcode/memory/. Provide name (used as filename slug), description (one-line summary), memory_type (user|feedback|project|reference), and content (markdown body). Use this to remember important context across sessions.
+- memory_delete: Delete a context memory by name. Provide the name used when saving.
+- memory_list: List all saved context memories with their descriptions.
 
 # Guidelines
 1. Before modifying files, ALWAYS read them first to understand the current state.
@@ -475,6 +510,19 @@ pub struct ListFilesArgs {
 #[derive(Deserialize, Debug)]
 pub struct ApplyPatchArgs {
     pub patch: String,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct MemorySaveArgs {
+    pub name: String,
+    pub description: String,
+    pub memory_type: MemoryType,
+    pub content: String,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct MemoryDeleteArgs {
+    pub name: String,
 }
 
 #[cfg(test)]
