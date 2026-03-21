@@ -4,3 +4,5 @@ opencode/
 .DS_Store
 cli/.bfcode/.gitignore
 .claude/settings.local.json
+cli/.bfcode/
+

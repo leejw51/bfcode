@@ -110,6 +110,20 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         ToolDefinition {
             tool_type: "function".into(),
             function: FunctionSchema {
+                name: "apply_patch".into(),
+                description: "Apply a unified diff patch to one or more files. Use standard format with --- a/file, +++ b/file, @@ hunk headers.".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "patch": {"type": "string", "description": "Unified diff content to apply"}
+                    },
+                    "required": ["patch"]
+                }),
+            },
+        },
+        ToolDefinition {
+            tool_type: "function".into(),
+            function: FunctionSchema {
                 name: "list_files".into(),
                 description: "List files and directories at the given path with type indicators.".into(),
                 parameters: serde_json::json!({
@@ -196,9 +210,14 @@ enum PermissionReply {
     Deny,
 }
 
-pub async fn execute_tool(name: &str, arguments: &str, permissions: &Permissions) -> String {
+pub async fn execute_tool(
+    name: &str,
+    arguments: &str,
+    permissions: &Permissions,
+    session_id: &str,
+) -> String {
     // Check permissions for dangerous tools
-    let needs_permission = matches!(name, "bash" | "write" | "edit");
+    let needs_permission = matches!(name, "bash" | "write" | "edit" | "apply_patch");
     if needs_permission {
         let summary = tool_permission_summary(name, arguments);
         match permissions.ask_permission(name, &summary) {
@@ -213,12 +232,13 @@ pub async fn execute_tool(name: &str, arguments: &str, permissions: &Permissions
 
     let result = match name {
         "read" => exec_read(arguments).await,
-        "write" => exec_write(arguments).await,
-        "edit" => exec_edit(arguments).await,
+        "write" => exec_write(arguments, session_id).await,
+        "edit" => exec_edit(arguments, session_id).await,
         "bash" => exec_bash(arguments).await,
         "glob" => exec_glob(arguments).await,
         "grep" => exec_grep(arguments).await,
         "list_files" => exec_list_files(arguments).await,
+        "apply_patch" => exec_apply_patch(arguments, session_id).await,
         _ => Err(anyhow::anyhow!("Unknown tool: {name}")),
     };
 
@@ -241,6 +261,11 @@ fn tool_permission_summary(name: &str, arguments: &str) -> String {
             "edit" => {
                 let path = v["path"].as_str().unwrap_or("");
                 format!("{path}")
+            }
+            "apply_patch" => {
+                let patch = v["patch"].as_str().unwrap_or("");
+                let file_count = patch.matches("+++ ").count();
+                format!("{file_count} file(s)")
             }
             _ => arguments.to_string(),
         },
@@ -386,8 +411,11 @@ async fn exec_read(arguments: &str) -> Result<String> {
     Ok(output)
 }
 
-async fn exec_write(arguments: &str) -> Result<String> {
+async fn exec_write(arguments: &str, session_id: &str) -> Result<String> {
     let args: WriteArgs = serde_json::from_str(arguments)?;
+
+    // Save snapshot before overwriting
+    save_file_snapshot(&args.path, session_id);
 
     // Create parent directories if needed
     if let Some(parent) = std::path::Path::new(&args.path).parent() {
@@ -410,13 +438,16 @@ async fn exec_write(arguments: &str) -> Result<String> {
     ))
 }
 
-async fn exec_edit(arguments: &str) -> Result<String> {
+async fn exec_edit(arguments: &str, session_id: &str) -> Result<String> {
     let args: EditArgs = serde_json::from_str(arguments)?;
 
     ensure!(
         args.old_string != args.new_string,
         "old_string and new_string must be different"
     );
+
+    // Save snapshot before editing
+    save_file_snapshot(&args.path, session_id);
 
     let content = tokio::fs::read_to_string(&args.path)
         .await
@@ -620,6 +651,258 @@ async fn exec_list_files(arguments: &str) -> Result<String> {
     Ok(entries.join("\n"))
 }
 
+// --- File Snapshot Helper ---
+
+/// Save a snapshot of a file before modification (for undo support)
+fn save_file_snapshot(path: &str, session_id: &str) {
+    if std::path::Path::new(path).exists() {
+        if let Ok(original) = std::fs::read_to_string(path) {
+            let snapshot = crate::types::FileSnapshot {
+                path: path.to_string(),
+                original_content: original,
+                timestamp: chrono::Local::now()
+                    .format("%Y%m%d_%H%M%S_%3f")
+                    .to_string(),
+                message_index: 0,
+            };
+            let _ = crate::persistence::save_snapshot(session_id, &snapshot);
+        }
+    }
+}
+
+// --- Apply Patch Tool ---
+
+async fn exec_apply_patch(arguments: &str, session_id: &str) -> Result<String> {
+    let args: ApplyPatchArgs = serde_json::from_str(arguments)?;
+    let file_patches = parse_unified_diff(&args.patch)?;
+
+    if file_patches.is_empty() {
+        bail!("No valid patches found in input");
+    }
+
+    let mut results = Vec::new();
+
+    for fp in &file_patches {
+        // Save snapshot before modifying
+        save_file_snapshot(&fp.target_path, session_id);
+
+        let content = if std::path::Path::new(&fp.target_path).exists() {
+            tokio::fs::read_to_string(&fp.target_path).await.unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        let patched = apply_hunks(&content, &fp.hunks)?;
+
+        // Create parent dirs
+        if let Some(parent) = std::path::Path::new(&fp.target_path).parent() {
+            if !parent.as_os_str().is_empty() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+        }
+
+        tokio::fs::write(&fp.target_path, &patched).await
+            .with_context(|| format!("writing {}", fp.target_path))?;
+
+        let status = if content.is_empty() { "A" } else { "M" };
+        results.push(format!("{status} {} ({} hunks applied)", fp.target_path, fp.hunks.len()));
+    }
+
+    Ok(results.join("\n"))
+}
+
+// --- Unified Diff Parser ---
+
+struct FilePatch {
+    target_path: String,
+    hunks: Vec<Hunk>,
+}
+
+struct Hunk {
+    old_start: usize,
+    _old_count: usize,
+    _new_start: usize,
+    _new_count: usize,
+    lines: Vec<DiffLine>,
+}
+
+#[derive(Debug)]
+enum DiffLine {
+    Context(String),
+    Add(String),
+    Remove(String),
+}
+
+fn parse_unified_diff(patch: &str) -> Result<Vec<FilePatch>> {
+    let mut file_patches = Vec::new();
+    let lines: Vec<&str> = patch.lines().collect();
+    let mut i = 0;
+
+    while i < lines.len() {
+        // Look for --- header
+        if lines[i].starts_with("--- ") && i + 1 < lines.len() && lines[i + 1].starts_with("+++ ") {
+            let _old_path = lines[i].strip_prefix("--- ").unwrap_or("").trim();
+            let new_path = lines[i + 1].strip_prefix("+++ ").unwrap_or("").trim();
+
+            // Strip a/ b/ prefixes
+            let target = new_path
+                .strip_prefix("b/")
+                .or_else(|| new_path.strip_prefix("a/"))
+                .unwrap_or(new_path)
+                .to_string();
+
+            i += 2;
+
+            let mut hunks = Vec::new();
+
+            // Parse hunks
+            while i < lines.len() && !lines[i].starts_with("--- ") {
+                if lines[i].starts_with("@@ ") {
+                    // Parse @@ -old_start,old_count +new_start,new_count @@
+                    let hunk_header = lines[i];
+                    let (old_start, old_count, new_start, new_count) = parse_hunk_header(hunk_header)?;
+                    i += 1;
+
+                    let mut hunk_lines = Vec::new();
+                    while i < lines.len()
+                        && !lines[i].starts_with("@@ ")
+                        && !lines[i].starts_with("--- ")
+                    {
+                        let line = lines[i];
+                        if line.starts_with('+') {
+                            hunk_lines.push(DiffLine::Add(line[1..].to_string()));
+                        } else if line.starts_with('-') {
+                            hunk_lines.push(DiffLine::Remove(line[1..].to_string()));
+                        } else if line.starts_with(' ') {
+                            hunk_lines.push(DiffLine::Context(line[1..].to_string()));
+                        } else if line == "\\ No newline at end of file" {
+                            // Skip
+                        } else if line.is_empty() {
+                            // Empty context line
+                            hunk_lines.push(DiffLine::Context(String::new()));
+                        } else {
+                            break;
+                        }
+                        i += 1;
+                    }
+
+                    hunks.push(Hunk {
+                        old_start,
+                        _old_count: old_count,
+                        _new_start: new_start,
+                        _new_count: new_count,
+                        lines: hunk_lines,
+                    });
+                } else {
+                    i += 1;
+                }
+            }
+
+            if !hunks.is_empty() || target != "/dev/null" {
+                file_patches.push(FilePatch {
+                    target_path: target,
+                    hunks,
+                });
+            }
+        } else {
+            i += 1;
+        }
+    }
+
+    Ok(file_patches)
+}
+
+fn parse_hunk_header(header: &str) -> Result<(usize, usize, usize, usize)> {
+    // @@ -1,5 +1,7 @@ optional context
+    let parts: Vec<&str> = header.split("@@").collect();
+    if parts.len() < 2 {
+        bail!("Invalid hunk header: {header}");
+    }
+    let range_part = parts[1].trim();
+    let ranges: Vec<&str> = range_part.split_whitespace().collect();
+    if ranges.len() < 2 {
+        bail!("Invalid hunk ranges: {range_part}");
+    }
+
+    let old = parse_range(ranges[0].strip_prefix('-').unwrap_or(ranges[0]))?;
+    let new = parse_range(ranges[1].strip_prefix('+').unwrap_or(ranges[1]))?;
+
+    Ok((old.0, old.1, new.0, new.1))
+}
+
+fn parse_range(s: &str) -> Result<(usize, usize)> {
+    if let Some((start, count)) = s.split_once(',') {
+        Ok((start.parse()?, count.parse()?))
+    } else {
+        let start: usize = s.parse()?;
+        Ok((start, 1))
+    }
+}
+
+fn apply_hunks(content: &str, hunks: &[Hunk]) -> Result<String> {
+    let mut lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
+
+    // Apply hunks in reverse order to preserve line numbers
+    let mut sorted_hunks: Vec<&Hunk> = hunks.iter().collect();
+    sorted_hunks.sort_by(|a, b| b.old_start.cmp(&a.old_start));
+
+    for hunk in sorted_hunks {
+        let start_idx = if hunk.old_start == 0 { 0 } else { hunk.old_start - 1 };
+
+        let mut remove_count = 0;
+        let mut add_lines = Vec::new();
+        let mut pos = start_idx;
+
+        for diff_line in &hunk.lines {
+            match diff_line {
+                DiffLine::Context(_) => {
+                    pos += 1;
+                }
+                DiffLine::Remove(_) => {
+                    remove_count += 1;
+                    pos += 1;
+                }
+                DiffLine::Add(text) => {
+                    add_lines.push((pos - remove_count, text.clone()));
+                }
+            }
+        }
+
+        // Simpler approach: rebuild the affected region
+        let mut new_lines = Vec::new();
+        let mut src_pos = start_idx;
+
+        for diff_line in &hunk.lines {
+            match diff_line {
+                DiffLine::Context(text) => {
+                    new_lines.push(text.clone());
+                    src_pos += 1;
+                }
+                DiffLine::Remove(_) => {
+                    src_pos += 1;
+                }
+                DiffLine::Add(text) => {
+                    new_lines.push(text.clone());
+                }
+            }
+        }
+
+        // Count context + remove lines to know how many old lines to replace
+        let old_line_count = hunk.lines.iter().filter(|l| !matches!(l, DiffLine::Add(_))).count();
+        let end_idx = (start_idx + old_line_count).min(lines.len());
+
+        // Replace the range
+        lines.splice(start_idx..end_idx, new_lines);
+    }
+
+    let mut result = lines.join("\n");
+    // Preserve trailing newline if original had one
+    if content.ends_with('\n') && !result.ends_with('\n') {
+        result.push('\n');
+    }
+    Ok(result)
+}
+
 /// Simple shell escape for arguments
 pub(crate) fn shell_escape(s: &str) -> String {
     if s.contains('\'') {
@@ -701,7 +984,7 @@ mod tests {
     #[test]
     fn test_tool_definitions_count() {
         let defs = get_tool_definitions();
-        assert_eq!(defs.len(), 7);
+        assert_eq!(defs.len(), 8);
     }
 
     #[test]
@@ -822,7 +1105,7 @@ mod tests {
         let file = dir.join("output.txt");
 
         let args = format!(r#"{{"path": "{}", "content": "hello\nworld"}}"#, file.display());
-        let result = exec_write(&args).await.unwrap();
+        let result = exec_write(&args, "test").await.unwrap();
         assert!(result.contains("Wrote"));
         assert!(result.contains("2 lines"));
 
@@ -839,7 +1122,7 @@ mod tests {
         let file = dir.join("a").join("b").join("c.txt");
 
         let args = format!(r#"{{"path": "{}", "content": "deep"}}"#, file.display());
-        let result = exec_write(&args).await.unwrap();
+        let result = exec_write(&args, "test").await.unwrap();
         assert!(result.contains("Wrote"));
         assert!(file.exists());
 
@@ -857,7 +1140,7 @@ mod tests {
             r#"{{"path": "{}", "old_string": "bar", "new_string": "qux"}}"#,
             file.display()
         );
-        let result = exec_edit(&args).await.unwrap();
+        let result = exec_edit(&args, "test").await.unwrap();
         assert!(result.contains("Edited"));
         assert!(result.contains("1 occurrence"));
 
@@ -878,7 +1161,7 @@ mod tests {
             r#"{{"path": "{}", "old_string": "aaa", "new_string": "ccc", "replace_all": true}}"#,
             file.display()
         );
-        let result = exec_edit(&args).await.unwrap();
+        let result = exec_edit(&args, "test").await.unwrap();
         assert!(result.contains("2 occurrence"));
 
         let content = std::fs::read_to_string(&file).unwrap();
@@ -898,7 +1181,7 @@ mod tests {
             r#"{{"path": "{}", "old_string": "xyz", "new_string": "abc"}}"#,
             file.display()
         );
-        let result = exec_edit(&args).await;
+        let result = exec_edit(&args, "test").await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("not found"));
@@ -917,7 +1200,7 @@ mod tests {
             r#"{{"path": "{}", "old_string": "hello", "new_string": "hello"}}"#,
             file.display()
         );
-        let result = exec_edit(&args).await;
+        let result = exec_edit(&args, "test").await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("must be different"));
 
@@ -935,7 +1218,7 @@ mod tests {
             r#"{{"path": "{}", "old_string": "aaa", "new_string": "ccc"}}"#,
             file.display()
         );
-        let result = exec_edit(&args).await;
+        let result = exec_edit(&args, "test").await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("2 matches"));
 
@@ -1025,8 +1308,314 @@ mod tests {
     #[tokio::test]
     async fn test_execute_unknown_tool() {
         let perms = Permissions::new();
-        let result = execute_tool("unknown_tool", "{}", &perms).await;
+        let result = execute_tool("unknown_tool", "{}", &perms, "test").await;
         assert!(result.contains("Error"));
         assert!(result.contains("Unknown tool"));
+    }
+
+    // --- Unified diff parsing ---
+
+    #[test]
+    fn test_parse_unified_diff_single_file() {
+        let patch = "\
+--- a/foo.txt
++++ b/foo.txt
+@@ -1,3 +1,3 @@
+ line1
+-old line
++new line
+ line3
+";
+        let patches = parse_unified_diff(patch).unwrap();
+        assert_eq!(patches.len(), 1);
+        assert_eq!(patches[0].target_path, "foo.txt");
+        assert_eq!(patches[0].hunks.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_unified_diff_multi_file() {
+        let patch = "\
+--- a/a.txt
++++ b/a.txt
+@@ -1 +1 @@
+-old
++new
+--- a/b.txt
++++ b/b.txt
+@@ -1 +1 @@
+-foo
++bar
+";
+        let patches = parse_unified_diff(patch).unwrap();
+        assert_eq!(patches.len(), 2);
+        assert_eq!(patches[0].target_path, "a.txt");
+        assert_eq!(patches[1].target_path, "b.txt");
+    }
+
+    #[test]
+    fn test_parse_hunk_header() {
+        let (os, oc, ns, nc) = parse_hunk_header("@@ -1,5 +1,7 @@ fn main").unwrap();
+        assert_eq!((os, oc, ns, nc), (1, 5, 1, 7));
+    }
+
+    #[test]
+    fn test_parse_hunk_header_single_line() {
+        let (os, oc, ns, nc) = parse_hunk_header("@@ -1 +1 @@").unwrap();
+        assert_eq!((os, oc, ns, nc), (1, 1, 1, 1));
+    }
+
+    #[test]
+    fn test_apply_hunks_simple_replace() {
+        let content = "line1\nold line\nline3\n";
+        let hunks = vec![Hunk {
+            old_start: 1,
+            _old_count: 3,
+            _new_start: 1,
+            _new_count: 3,
+            lines: vec![
+                DiffLine::Context("line1".into()),
+                DiffLine::Remove("old line".into()),
+                DiffLine::Add("new line".into()),
+                DiffLine::Context("line3".into()),
+            ],
+        }];
+        let result = apply_hunks(content, &hunks).unwrap();
+        assert!(result.contains("new line"));
+        assert!(!result.contains("old line"));
+        assert!(result.contains("line1"));
+        assert!(result.contains("line3"));
+    }
+
+    #[test]
+    fn test_apply_hunks_add_lines() {
+        let content = "line1\nline2\n";
+        let hunks = vec![Hunk {
+            old_start: 1,
+            _old_count: 2,
+            _new_start: 1,
+            _new_count: 3,
+            lines: vec![
+                DiffLine::Context("line1".into()),
+                DiffLine::Add("inserted".into()),
+                DiffLine::Context("line2".into()),
+            ],
+        }];
+        let result = apply_hunks(content, &hunks).unwrap();
+        let lines: Vec<&str> = result.lines().collect();
+        assert_eq!(lines, vec!["line1", "inserted", "line2"]);
+    }
+
+    #[test]
+    fn test_apply_hunks_remove_lines() {
+        let content = "line1\ndelete_me\nline3\n";
+        let hunks = vec![Hunk {
+            old_start: 1,
+            _old_count: 3,
+            _new_start: 1,
+            _new_count: 2,
+            lines: vec![
+                DiffLine::Context("line1".into()),
+                DiffLine::Remove("delete_me".into()),
+                DiffLine::Context("line3".into()),
+            ],
+        }];
+        let result = apply_hunks(content, &hunks).unwrap();
+        let lines: Vec<&str> = result.lines().collect();
+        assert_eq!(lines, vec!["line1", "line3"]);
+    }
+
+    #[test]
+    fn test_apply_hunks_new_file() {
+        let content = "";
+        let hunks = vec![Hunk {
+            old_start: 0,
+            _old_count: 0,
+            _new_start: 1,
+            _new_count: 2,
+            lines: vec![
+                DiffLine::Add("new line 1".into()),
+                DiffLine::Add("new line 2".into()),
+            ],
+        }];
+        let result = apply_hunks(content, &hunks).unwrap();
+        assert!(result.contains("new line 1"));
+        assert!(result.contains("new line 2"));
+    }
+
+    #[tokio::test]
+    async fn test_exec_apply_patch_creates_file() {
+        let tmp = std::env::temp_dir().join(format!("bfcode_patch_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let target = tmp.join("new_file.txt");
+        let patch = format!(
+            "--- /dev/null\n+++ b/{}\n@@ -0,0 +1,2 @@\n+hello\n+world\n",
+            target.display()
+        );
+        let args = serde_json::json!({"patch": patch}).to_string();
+
+        let result = exec_apply_patch(&args, "test_session").await.unwrap();
+        assert!(result.contains("A "));
+        assert!(target.exists());
+        let content = std::fs::read_to_string(&target).unwrap();
+        assert!(content.contains("hello"));
+        assert!(content.contains("world"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_tool_definitions_includes_apply_patch() {
+        let defs = get_tool_definitions();
+        assert!(defs.iter().any(|d| d.function.name == "apply_patch"));
+    }
+
+    // ── apply_patch: multi-hunk ──────────────────────────────────────
+
+    #[test]
+    fn test_apply_hunks_multiple_hunks() {
+        let content = "aaa\nbbb\nccc\nddd\neee\nfff\nggg\n";
+        let hunks = vec![
+            Hunk {
+                old_start: 1,
+                _old_count: 3,
+                _new_start: 1,
+                _new_count: 3,
+                lines: vec![
+                    DiffLine::Context("aaa".into()),
+                    DiffLine::Remove("bbb".into()),
+                    DiffLine::Add("BBB".into()),
+                    DiffLine::Context("ccc".into()),
+                ],
+            },
+            Hunk {
+                old_start: 5,
+                _old_count: 3,
+                _new_start: 5,
+                _new_count: 3,
+                lines: vec![
+                    DiffLine::Context("eee".into()),
+                    DiffLine::Remove("fff".into()),
+                    DiffLine::Add("FFF".into()),
+                    DiffLine::Context("ggg".into()),
+                ],
+            },
+        ];
+        let result = apply_hunks(content, &hunks).unwrap();
+        assert!(result.contains("BBB"));
+        assert!(result.contains("FFF"));
+        assert!(!result.contains("\nbbb\n"));
+        assert!(!result.contains("\nfff\n"));
+    }
+
+    // ── apply_patch: parse edge cases ────────────────────────────────
+
+    #[test]
+    fn test_parse_unified_diff_no_newline_marker() {
+        let patch = "\
+--- a/foo.txt
++++ b/foo.txt
+@@ -1,2 +1,2 @@
+-old
++new
+\\ No newline at end of file
+";
+        let patches = parse_unified_diff(patch).unwrap();
+        assert_eq!(patches.len(), 1);
+        assert_eq!(patches[0].hunks.len(), 1);
+        // The marker line should be skipped, not treated as diff content
+        let hunk_lines = &patches[0].hunks[0].lines;
+        assert_eq!(hunk_lines.len(), 2); // just Remove + Add
+    }
+
+    #[test]
+    fn test_parse_unified_diff_empty_patch() {
+        let patches = parse_unified_diff("").unwrap();
+        assert!(patches.is_empty());
+    }
+
+    #[test]
+    fn test_parse_unified_diff_garbage_input() {
+        let patches = parse_unified_diff("this is not a patch\nrandom text\n").unwrap();
+        assert!(patches.is_empty());
+    }
+
+    #[test]
+    fn test_parse_unified_diff_with_context_line() {
+        let patch = "\
+--- a/foo.txt
++++ b/foo.txt
+@@ -1,5 +1,5 @@ function context
+ line1
+ line2
+-old
++new
+ line4
+ line5
+";
+        let patches = parse_unified_diff(patch).unwrap();
+        let hunk = &patches[0].hunks[0];
+        assert_eq!(hunk.lines.len(), 6); // 2 context + remove + add + 2 context
+    }
+
+    // ── apply_patch: exec with existing file ─────────────────────────
+
+    #[tokio::test]
+    async fn test_exec_apply_patch_modifies_existing() {
+        let tmp = std::env::temp_dir().join(format!("bfcode_patch_mod_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let target = tmp.join("existing.txt");
+        std::fs::write(&target, "line1\nold_line\nline3\n").unwrap();
+
+        let patch = format!(
+            "--- a/{path}\n+++ b/{path}\n@@ -1,3 +1,3 @@\n line1\n-old_line\n+new_line\n line3\n",
+            path = target.display()
+        );
+        let args = serde_json::json!({"patch": patch}).to_string();
+        let result = exec_apply_patch(&args, "test").await.unwrap();
+        assert!(result.contains("M "));
+
+        let content = std::fs::read_to_string(&target).unwrap();
+        assert!(content.contains("new_line"));
+        assert!(!content.contains("old_line"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ── apply_patch: empty patch error ───────────────────────────────
+
+    #[tokio::test]
+    async fn test_exec_apply_patch_empty_patch_error() {
+        let args = serde_json::json!({"patch": ""}).to_string();
+        let result = exec_apply_patch(&args, "test").await;
+        assert!(result.is_err());
+    }
+
+    // ── apply_patch: parse range ─────────────────────────────────────
+
+    #[test]
+    fn test_parse_range_with_comma() {
+        let (start, count) = parse_range("10,5").unwrap();
+        assert_eq!(start, 10);
+        assert_eq!(count, 5);
+    }
+
+    #[test]
+    fn test_parse_range_single_number() {
+        let (start, count) = parse_range("42").unwrap();
+        assert_eq!(start, 42);
+        assert_eq!(count, 1);
+    }
+
+    // ── tool permission summary for apply_patch ──────────────────────
+
+    #[test]
+    fn test_tool_permission_summary_apply_patch() {
+        let args = r#"{"patch": "--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n--- a/b.txt\n+++ b/b.txt\n@@ -1 +1 @@\n-x\n+y"}"#;
+        let summary = tool_permission_summary("apply_patch", args);
+        assert!(summary.contains("2 file(s)"));
     }
 }
