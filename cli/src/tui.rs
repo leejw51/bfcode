@@ -1,6 +1,9 @@
 use anyhow::Result;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
+    event::{
+        self, Event, KeyCode, KeyEvent, KeyModifiers, KeyboardEnhancementFlags,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    },
     execute,
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -165,8 +168,8 @@ impl App {
                 self.total_lines = 0;
             }
 
-            // ----- Newline (Ctrl+Enter) -----
-            (KeyModifiers::CONTROL, KeyCode::Enter) => {
+            // ----- Newline (Shift+Enter) -----
+            (KeyModifiers::SHIFT, KeyCode::Enter) => {
                 self.input.insert(self.cursor_pos, '\n');
                 self.cursor_pos += 1;
             }
@@ -310,6 +313,12 @@ pub fn init_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
     terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
+    // Enable kitty keyboard protocol so terminals report modifiers on all keys
+    // (e.g. Shift+Space). Ignore errors for terminals that don't support it.
+    let _ = execute!(
+        stdout,
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    );
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
     Ok(terminal)
@@ -318,6 +327,7 @@ pub fn init_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
 /// Restore terminal to normal mode.
 pub fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
     terminal::disable_raw_mode()?;
+    let _ = execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags);
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
     Ok(())
@@ -558,7 +568,7 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" Input (Enter=send, Ctrl+Enter=newline) ")
+                .title(" Input (Enter=send, Shift+Enter=newline) ")
                 .border_style(Style::default().fg(Color::Cyan)),
         )
         .wrap(Wrap { trim: false });
@@ -618,7 +628,7 @@ fn draw_help_overlay(f: &mut Frame, app: &App) {
             Span::raw("Send message"),
         ]),
         Line::from(vec![
-            Span::styled("Ctrl+Enter   ", Style::default().fg(Color::Yellow)),
+            Span::styled("Shift+Enter  ", Style::default().fg(Color::Yellow)),
             Span::raw("Insert newline"),
         ]),
         Line::from(vec![

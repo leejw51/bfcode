@@ -659,6 +659,13 @@ pub const SYSTEM_PROMPT: &str = r#"You are bfcode (back to the future code), a c
 - browser_type: Type text into a form element by CSS selector in the browser.
 - browser_evaluate: Evaluate JavaScript in the browser and return the result.
 - browser_close: Close the headless browser.
+- multiedit: Apply multiple find-and-replace edits to a single file in one atomic operation. Provide path and an array of edits (each with old_string, new_string, optional replace_all). Edits are applied sequentially.
+- batch: Execute multiple independent tool calls in parallel (up to 25). Provide tool_calls array with tool name and parameters. Cannot nest batch calls. Great for parallel reads, searches, or independent edits.
+- task: Launch a subagent to handle a complex multi-step task autonomously. Provide description (3-5 words), prompt (full task), and optional subagent_type. The subagent runs in a separate session with its own context.
+- todowrite: Write/update the session todo list. Provide todos array with content, status (pending/in_progress/completed/cancelled), and priority (high/medium/low). Replaces the entire todo list.
+- todoread: Read the current session todo list. Returns all todos with their status and priority.
+- plan_enter: Enter plan mode (read-only). In plan mode, write/edit/apply_patch tools are disabled. Only reads, searches, and writing to .bfcode/plans/ are allowed. Use this to create a detailed plan before implementation.
+- plan_exit: Exit plan mode and return to build mode where all tools are available.
 
 # Guidelines
 1. Before modifying files, ALWAYS read them first to understand the current state.
@@ -826,6 +833,113 @@ pub struct BrowserTypeArgs {
 pub struct BrowserEvaluateArgs {
     pub script: String,
 }
+
+// --- Multi-Edit Tool Args ---
+
+#[derive(Deserialize, Debug)]
+pub struct MultiEditArgs {
+    pub path: String,
+    pub edits: Vec<SingleEdit>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct SingleEdit {
+    pub old_string: String,
+    pub new_string: String,
+    #[serde(default)]
+    pub replace_all: Option<bool>,
+}
+
+// --- Batch Tool Args ---
+
+#[derive(Deserialize, Debug)]
+pub struct BatchArgs {
+    pub tool_calls: Vec<BatchToolCall>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct BatchToolCall {
+    pub tool: String,
+    pub parameters: serde_json::Value,
+}
+
+// --- Task/Subagent Tool Args ---
+
+#[derive(Deserialize, Debug)]
+pub struct TaskToolArgs {
+    pub description: String,
+    pub prompt: String,
+    #[serde(default)]
+    pub subagent_type: Option<String>,
+}
+
+// --- Todo Tool Args ---
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct TodoItem {
+    pub content: String,
+    pub status: TodoStatus,
+    #[serde(default = "default_priority")]
+    pub priority: TodoPriority,
+}
+
+fn default_priority() -> TodoPriority {
+    TodoPriority::Medium
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum TodoStatus {
+    Pending,
+    InProgress,
+    Completed,
+    Cancelled,
+}
+
+impl std::fmt::Display for TodoStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TodoStatus::Pending => write!(f, "pending"),
+            TodoStatus::InProgress => write!(f, "in_progress"),
+            TodoStatus::Completed => write!(f, "completed"),
+            TodoStatus::Cancelled => write!(f, "cancelled"),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum TodoPriority {
+    High,
+    Medium,
+    Low,
+}
+
+impl std::fmt::Display for TodoPriority {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TodoPriority::High => write!(f, "high"),
+            TodoPriority::Medium => write!(f, "medium"),
+            TodoPriority::Low => write!(f, "low"),
+        }
+    }
+}
+
+#[derive(Deserialize, Debug)]
+pub struct TodoWriteArgs {
+    pub todos: Vec<TodoItem>,
+}
+
+// --- Plan Mode Args ---
+
+#[derive(Deserialize, Debug)]
+pub struct PlanEnterArgs {
+    #[serde(default)]
+    pub plan_name: Option<String>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct PlanExitArgs {}
 
 #[cfg(test)]
 mod tests {

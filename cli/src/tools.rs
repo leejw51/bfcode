@@ -2,9 +2,16 @@ use crate::types::*;
 use anyhow::{Context, Result, bail, ensure};
 use colored::Colorize;
 use std::collections::HashSet;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+
+/// Session-scoped todo list (thread-safe, keyed by session_id)
+static SESSION_TODOS: std::sync::LazyLock<Mutex<std::collections::HashMap<String, Vec<TodoItem>>>> =
+    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+/// Plan mode flag (true = plan mode active, write tools disabled)
+static PLAN_MODE: AtomicBool = AtomicBool::new(false);
 
 // Output limits (inspired by opencode)
 const MAX_OUTPUT_LINES: usize = 2000;
@@ -324,6 +331,140 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                 }),
             },
         },
+        // --- Multi-Edit Tool ---
+        ToolDefinition {
+            tool_type: "function".into(),
+            function: FunctionSchema {
+                name: "multiedit".into(),
+                description: "Apply multiple find-and-replace edits to a single file in one atomic operation. Edits are applied sequentially so each edit sees the result of the previous one. Prevents repeated tool round-trips.".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Absolute or relative file path to edit"},
+                        "edits": {
+                            "type": "array",
+                            "description": "Array of edit operations to apply sequentially",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "old_string": {"type": "string", "description": "Exact string to find and replace"},
+                                    "new_string": {"type": "string", "description": "Replacement string"},
+                                    "replace_all": {"type": "boolean", "description": "Replace all occurrences. Default false."}
+                                },
+                                "required": ["old_string", "new_string"]
+                            }
+                        }
+                    },
+                    "required": ["path", "edits"]
+                }),
+            },
+        },
+        // --- Batch Tool ---
+        ToolDefinition {
+            tool_type: "function".into(),
+            function: FunctionSchema {
+                name: "batch".into(),
+                description: "Execute multiple independent tool calls in parallel (up to 25). Returns results for each call. Cannot nest batch calls. Great for parallel reads, searches, or independent edits across different files.".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "tool_calls": {
+                            "type": "array",
+                            "description": "Array of tool calls to execute in parallel (max 25)",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "tool": {"type": "string", "description": "Tool name to call"},
+                                    "parameters": {"type": "object", "description": "Tool parameters as a JSON object"}
+                                },
+                                "required": ["tool", "parameters"]
+                            }
+                        }
+                    },
+                    "required": ["tool_calls"]
+                }),
+            },
+        },
+        // --- Task/Subagent Tool ---
+        ToolDefinition {
+            tool_type: "function".into(),
+            function: FunctionSchema {
+                name: "task".into(),
+                description: "Launch a subagent to handle a complex multi-step task autonomously. The subagent runs in a separate session with its own context. Use for exploration, planning, or independent work that shouldn't pollute the main conversation.".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "description": {"type": "string", "description": "Short 3-5 word task description"},
+                        "prompt": {"type": "string", "description": "Full task prompt for the subagent"},
+                        "subagent_type": {"type": "string", "enum": ["explore", "plan", "build"], "description": "Type of subagent: explore (read-only research), plan (create a plan), build (implement changes). Default: explore."}
+                    },
+                    "required": ["description", "prompt"]
+                }),
+            },
+        },
+        // --- Todo Tools ---
+        ToolDefinition {
+            tool_type: "function".into(),
+            function: FunctionSchema {
+                name: "todowrite".into(),
+                description: "Write/update the session todo list for tracking progress. Replaces the entire todo list. Use to track multi-step work within a session.".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "todos": {
+                            "type": "array",
+                            "description": "Complete todo list (replaces existing)",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "content": {"type": "string", "description": "Brief description of the task"},
+                                    "status": {"type": "string", "enum": ["pending", "in_progress", "completed", "cancelled"], "description": "Task status"},
+                                    "priority": {"type": "string", "enum": ["high", "medium", "low"], "description": "Task priority. Default: medium."}
+                                },
+                                "required": ["content", "status"]
+                            }
+                        }
+                    },
+                    "required": ["todos"]
+                }),
+            },
+        },
+        ToolDefinition {
+            tool_type: "function".into(),
+            function: FunctionSchema {
+                name: "todoread".into(),
+                description: "Read the current session todo list. Returns all todos with their status and priority.".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+            },
+        },
+        // --- Plan Mode Tools ---
+        ToolDefinition {
+            tool_type: "function".into(),
+            function: FunctionSchema {
+                name: "plan_enter".into(),
+                description: "Enter plan mode (read-only phase). In plan mode, write/edit/apply_patch tools are disabled — only reads, searches, and writing to .bfcode/plans/ are allowed. Use this to design a detailed plan before implementation.".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "plan_name": {"type": "string", "description": "Optional name for the plan being created"}
+                    }
+                }),
+            },
+        },
+        ToolDefinition {
+            tool_type: "function".into(),
+            function: FunctionSchema {
+                name: "plan_exit".into(),
+                description: "Exit plan mode and return to build mode where all tools are available. Call this when planning is complete and you're ready to implement.".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+            },
+        },
     ];
 
     // Conditionally add tools that require API keys
@@ -462,14 +603,43 @@ enum PermissionReply {
     Deny,
 }
 
-pub async fn execute_tool(
+pub fn execute_tool<'a>(
+    name: &'a str,
+    arguments: &'a str,
+    permissions: &'a Permissions,
+    session_id: &'a str,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = String> + 'a>> {
+    Box::pin(execute_tool_inner(name, arguments, permissions, session_id))
+}
+
+async fn execute_tool_inner(
     name: &str,
     arguments: &str,
     permissions: &Permissions,
     session_id: &str,
 ) -> String {
-    // Check protected files for write/edit/apply_patch
-    if matches!(name, "write" | "edit" | "apply_patch") {
+    // Plan mode: block write tools (except plan_exit and writing to .bfcode/plans/)
+    if is_plan_mode() && matches!(name, "write" | "edit" | "apply_patch" | "multiedit" | "bash") {
+        // Allow writes to .bfcode/plans/ in plan mode
+        let is_plan_write = if matches!(name, "write" | "edit" | "multiedit") {
+            serde_json::from_str::<serde_json::Value>(arguments)
+                .ok()
+                .and_then(|v| v.get("path")?.as_str().map(|s| s.contains(".bfcode/plans/")))
+                .unwrap_or(false)
+        } else {
+            false
+        };
+        if !is_plan_write {
+            return format!(
+                "Error: Tool '{name}' is disabled in plan mode. \
+                 Use plan_exit to switch to build mode before making changes. \
+                 In plan mode, only read/search tools and writing to .bfcode/plans/ are allowed."
+            );
+        }
+    }
+
+    // Check protected files for write/edit/apply_patch/multiedit
+    if matches!(name, "write" | "edit" | "apply_patch" | "multiedit") {
         if let Some(msg) = check_protected_file(name, arguments) {
             return msg;
         }
@@ -482,6 +652,7 @@ pub async fn execute_tool(
             | "write"
             | "edit"
             | "apply_patch"
+            | "multiedit"
             | "memory_save"
             | "memory_delete"
             | "browser_navigate"
@@ -527,6 +698,13 @@ pub async fn execute_tool(
         "browser_type" => exec_browser_type(arguments).await,
         "browser_evaluate" => exec_browser_evaluate(arguments).await,
         "browser_close" => exec_browser_close().await,
+        "multiedit" => exec_multiedit(arguments, session_id).await,
+        "batch" => exec_batch(arguments, permissions, session_id).await,
+        "task" => exec_task(arguments, permissions, session_id).await,
+        "todowrite" => exec_todowrite(arguments, session_id).await,
+        "todoread" => exec_todoread(session_id).await,
+        "plan_enter" => exec_plan_enter(arguments).await,
+        "plan_exit" => exec_plan_exit().await,
         _ => Err(anyhow::anyhow!("Unknown tool: {name}")),
     };
 
@@ -554,6 +732,11 @@ fn tool_permission_summary(name: &str, arguments: &str) -> String {
                 let patch = v["patch"].as_str().unwrap_or("");
                 let file_count = patch.matches("+++ ").count();
                 format!("{file_count} file(s)")
+            }
+            "multiedit" => {
+                let path = v["path"].as_str().unwrap_or("");
+                let count = v["edits"].as_array().map(|a| a.len()).unwrap_or(0);
+                format!("{path} ({count} edits)")
             }
             _ => arguments.to_string(),
         },
@@ -640,6 +823,30 @@ pub fn print_tool_call(name: &str, arguments: &str) {
                 format!("{short}...")
             }
             "browser_close" => "closing browser".to_string(),
+            "multiedit" => {
+                let path = v["path"].as_str().unwrap_or("");
+                let count = v["edits"].as_array().map(|a| a.len()).unwrap_or(0);
+                format!("{path} ({count} edits)")
+            }
+            "batch" => {
+                let count = v["tool_calls"].as_array().map(|a| a.len()).unwrap_or(0);
+                format!("{count} tool calls in parallel")
+            }
+            "task" => {
+                let desc = v["description"].as_str().unwrap_or("");
+                let agent = v["subagent_type"].as_str().unwrap_or("explore");
+                format!("{desc} ({agent})")
+            }
+            "todowrite" => {
+                let count = v["todos"].as_array().map(|a| a.len()).unwrap_or(0);
+                format!("{count} todos")
+            }
+            "todoread" => "reading todos".to_string(),
+            "plan_enter" => {
+                let name = v["plan_name"].as_str().unwrap_or("unnamed");
+                format!("entering plan mode ({name})")
+            }
+            "plan_exit" => "exiting plan mode".to_string(),
             _ => arguments.to_string(),
         },
         Err(_) => arguments.to_string(),
@@ -1915,6 +2122,384 @@ async fn exec_browser_close() -> Result<String> {
     crate::browser::browser_close().await
 }
 
+// --- Multi-Edit Tool ---
+
+async fn exec_multiedit(arguments: &str, session_id: &str) -> Result<String> {
+    let args: MultiEditArgs = serde_json::from_str(arguments)?;
+
+    ensure!(!args.edits.is_empty(), "edits array must not be empty");
+
+    // Save snapshot before editing
+    save_file_snapshot(&args.path, session_id);
+
+    let mut content = tokio::fs::read_to_string(&args.path)
+        .await
+        .with_context(|| format!("reading {}", args.path))?;
+
+    let mut total_replacements = 0;
+
+    for (i, edit) in args.edits.iter().enumerate() {
+        ensure!(
+            edit.old_string != edit.new_string,
+            "Edit #{}: old_string and new_string must be different",
+            i + 1
+        );
+
+        let replace_all = edit.replace_all.unwrap_or(false);
+        let match_count = content.matches(&edit.old_string).count();
+
+        if match_count == 0 {
+            let trimmed_old = edit.old_string.trim();
+            let trimmed_count = content.matches(trimmed_old).count();
+            if trimmed_count > 0 {
+                bail!(
+                    "Edit #{}: No exact match found, but found {trimmed_count} match(es) with trimmed whitespace. Check indentation.",
+                    i + 1
+                );
+            }
+            bail!(
+                "Edit #{}: old_string not found in {}. Previous edits may have changed the content.",
+                i + 1,
+                args.path
+            );
+        }
+
+        ensure!(
+            match_count == 1 || replace_all,
+            "Edit #{}: Found {match_count} matches. Provide more context or set replace_all=true.",
+            i + 1
+        );
+
+        content = if replace_all {
+            content.replace(&edit.old_string, &edit.new_string)
+        } else {
+            content.replacen(&edit.old_string, &edit.new_string, 1)
+        };
+
+        total_replacements += if replace_all { match_count } else { 1 };
+    }
+
+    tokio::fs::write(&args.path, &content)
+        .await
+        .with_context(|| format!("writing {}", args.path))?;
+
+    Ok(format!(
+        "Multi-edited {}: applied {} edits ({total_replacements} total replacements)",
+        args.path,
+        args.edits.len()
+    ))
+}
+
+// --- Batch Tool ---
+
+const MAX_BATCH_CALLS: usize = 25;
+const DISALLOWED_BATCH_TOOLS: &[&str] = &["batch", "task"]; // prevent nesting
+
+async fn exec_batch(arguments: &str, permissions: &Permissions, session_id: &str) -> Result<String> {
+    let args: BatchArgs = serde_json::from_str(arguments)?;
+
+    ensure!(!args.tool_calls.is_empty(), "tool_calls array must not be empty");
+
+    let call_count = args.tool_calls.len();
+    if call_count > MAX_BATCH_CALLS {
+        bail!("Too many tool calls ({call_count}). Maximum is {MAX_BATCH_CALLS}.");
+    }
+
+    // Validate tools
+    for (i, tc) in args.tool_calls.iter().enumerate() {
+        if DISALLOWED_BATCH_TOOLS.contains(&tc.tool.as_str()) {
+            bail!(
+                "Tool call #{}: '{}' cannot be used inside batch.",
+                i + 1,
+                tc.tool
+            );
+        }
+    }
+
+    // Execute all tool calls in parallel using futures
+    let futures: Vec<_> = args
+        .tool_calls
+        .iter()
+        .map(|tc| {
+            let tool_args = serde_json::to_string(&tc.parameters).unwrap_or_default();
+            let tool_name = tc.tool.clone();
+            async move {
+                let result = execute_tool(&tool_name, &tool_args, permissions, session_id).await;
+                (tool_name, result)
+            }
+        })
+        .collect();
+
+    let results: Vec<(String, String)> = futures_util::future::join_all(futures).await;
+
+    Ok(format!(
+        "Batch executed {} tool calls:\n\n{}",
+        call_count,
+        results
+            .iter()
+            .enumerate()
+            .map(|(i, (name, output))| format!("--- Call {} [{name}] ---\n{output}", i + 1))
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    ))
+}
+
+// --- Task/Subagent Tool ---
+
+async fn exec_task(
+    arguments: &str,
+    permissions: &Permissions,
+    session_id: &str,
+) -> Result<String> {
+    let args: TaskToolArgs = serde_json::from_str(arguments)?;
+    let agent_type = args.subagent_type.as_deref().unwrap_or("explore");
+
+    eprintln!(
+        "  {} Spawning {} subagent: {}",
+        "+".green(),
+        agent_type.cyan(),
+        args.description.dimmed()
+    );
+
+    // Build a restricted tool set based on agent type
+    let restricted_tools: Vec<&str> = match agent_type {
+        "explore" => vec![
+            "read", "glob", "grep", "list_files", "webfetch", "websearch",
+            "memory_list", "memory_search", "pdf_read",
+        ],
+        "plan" => vec![
+            "read", "glob", "grep", "list_files", "webfetch", "websearch",
+            "memory_list", "memory_search", "pdf_read", "write",
+        ],
+        "build" => vec![
+            "read", "write", "edit", "bash", "glob", "grep", "list_files",
+            "apply_patch", "multiedit", "webfetch", "websearch",
+            "memory_save", "memory_list", "memory_search",
+        ],
+        _ => vec![
+            "read", "glob", "grep", "list_files", "webfetch", "websearch",
+            "memory_list", "memory_search",
+        ],
+    };
+
+    // Create a child session
+    let child_session_id = format!(
+        "{session_id}_task_{}",
+        chrono::Local::now().format("%H%M%S")
+    );
+
+    // Build system prompt for subagent
+    let subagent_prompt = format!(
+        "You are a {} subagent working on a specific task.\n\
+         Your task: {}\n\n\
+         Instructions:\n\
+         {}\n\n\
+         Available tools: {}\n\
+         Complete the task and provide a clear summary of your findings/results.",
+        agent_type,
+        args.description,
+        args.prompt,
+        restricted_tools.join(", ")
+    );
+
+    // Get the available tool definitions, filtered by allowed tools
+    let all_tools = get_tool_definitions();
+    let filtered_tools: Vec<ToolDefinition> = all_tools
+        .into_iter()
+        .filter(|t| restricted_tools.contains(&t.function.name.as_str()))
+        .collect();
+
+    // Create the subagent conversation
+    let messages = vec![
+        Message::system(&subagent_prompt),
+        Message::user(&args.prompt),
+    ];
+
+    // Load config and create client
+    let config = crate::persistence::load_config();
+    let client = crate::api::create_client(&config)?;
+
+    // Run the subagent loop (simplified — max 15 rounds)
+    let max_rounds = 15;
+    let mut conversation = messages;
+    let mut final_response = String::from("(no response from subagent)");
+
+    for _round in 0..max_rounds {
+        let response = client
+            .chat(&conversation, &filtered_tools, &config.model, config.temperature)
+            .await?;
+
+        if response.choices.is_empty() {
+            break;
+        }
+
+        let assistant_msg = &response.choices[0].message;
+
+        if let Some(tool_calls) = &assistant_msg.tool_calls {
+            conversation.push(Message::assistant_tool_calls(tool_calls.clone()));
+
+            for tc in tool_calls {
+                // Only allow tools in the restricted set
+                if !restricted_tools.contains(&tc.function.name.as_str()) {
+                    conversation.push(Message::tool_result(
+                        &tc.id,
+                        &format!("Error: Tool '{}' is not available for {} subagent.", tc.function.name, agent_type),
+                    ));
+                    continue;
+                }
+
+                let result = execute_tool(
+                    &tc.function.name,
+                    &tc.function.arguments,
+                    permissions,
+                    &child_session_id,
+                )
+                .await;
+                conversation.push(Message::tool_result(&tc.id, &result));
+            }
+            continue;
+        }
+
+        if let Some(content) = &assistant_msg.content {
+            final_response = content.clone();
+            conversation.push(Message::assistant_text(content));
+        }
+        break;
+    }
+
+    Ok(format!(
+        "<task_result>\nAgent: {agent_type}\nTask: {}\n\n{final_response}\n</task_result>",
+        args.description
+    ))
+}
+
+// --- Todo Tools ---
+
+async fn exec_todowrite(arguments: &str, session_id: &str) -> Result<String> {
+    let args: TodoWriteArgs = serde_json::from_str(arguments)?;
+
+    let count = args.todos.len();
+    let mut todos = SESSION_TODOS.lock().unwrap_or_else(|e| e.into_inner());
+    todos.insert(session_id.to_string(), args.todos);
+
+    // Also persist to .bfcode/sessions/{session_id}_todos.json
+    let todo_path = format!(".bfcode/sessions/{session_id}_todos.json");
+    if let Some(parent) = std::path::Path::new(&todo_path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(todos.get(session_id).unwrap()) {
+        let _ = std::fs::write(&todo_path, json);
+    }
+
+    Ok(format!("Todo list updated: {count} items"))
+}
+
+async fn exec_todoread(session_id: &str) -> Result<String> {
+    let todos = SESSION_TODOS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(items) = todos.get(session_id) {
+        if !items.is_empty() {
+            return Ok(format_todos(items));
+        }
+    }
+    drop(todos);
+
+    // Try loading from disk
+    let todo_path = format!(".bfcode/sessions/{session_id}_todos.json");
+    if let Ok(data) = std::fs::read_to_string(&todo_path) {
+        if let Ok(items) = serde_json::from_str::<Vec<TodoItem>>(&data) {
+            if !items.is_empty() {
+                let mut todos = SESSION_TODOS.lock().unwrap_or_else(|e| e.into_inner());
+                todos.insert(session_id.to_string(), items.clone());
+                return Ok(format_todos(&items));
+            }
+        }
+    }
+    Ok("No todos in this session.".to_string())
+}
+
+fn format_todos(items: &[TodoItem]) -> String {
+    let mut output = String::from("Session todos:\n");
+    for (i, item) in items.iter().enumerate() {
+        let icon = match item.status {
+            TodoStatus::Pending => "[ ]",
+            TodoStatus::InProgress => "[~]",
+            TodoStatus::Completed => "[x]",
+            TodoStatus::Cancelled => "[-]",
+        };
+        let priority_tag = match item.priority {
+            TodoPriority::High => " [HIGH]",
+            TodoPriority::Medium => "",
+            TodoPriority::Low => " [low]",
+        };
+        output.push_str(&format!(
+            "  {}. {} {}{}\n",
+            i + 1,
+            icon,
+            item.content,
+            priority_tag
+        ));
+    }
+
+    // Summary
+    let pending = items.iter().filter(|t| t.status == TodoStatus::Pending).count();
+    let in_progress = items.iter().filter(|t| t.status == TodoStatus::InProgress).count();
+    let completed = items.iter().filter(|t| t.status == TodoStatus::Completed).count();
+    output.push_str(&format!(
+        "\nSummary: {} pending, {} in progress, {} completed (of {} total)",
+        pending, in_progress, completed, items.len()
+    ));
+    output
+}
+
+// --- Plan Mode Tools ---
+
+/// Check if plan mode is currently active
+pub fn is_plan_mode() -> bool {
+    PLAN_MODE.load(Ordering::Relaxed)
+}
+
+async fn exec_plan_enter(arguments: &str) -> Result<String> {
+    let args: PlanEnterArgs = serde_json::from_str(arguments)?;
+
+    if is_plan_mode() {
+        return Ok("Already in plan mode.".to_string());
+    }
+
+    PLAN_MODE.store(true, Ordering::Relaxed);
+
+    let plan_name = args.plan_name.as_deref().unwrap_or("unnamed");
+    eprintln!(
+        "  {} Plan mode activated: {}",
+        "!".yellow().bold(),
+        plan_name.cyan()
+    );
+
+    Ok(format!(
+        "Plan mode activated (plan: '{plan_name}'). \
+         Write/edit/bash tools are now disabled. \
+         Use read/search tools to explore the codebase and design your plan. \
+         You can write plans to .bfcode/plans/. \
+         Call plan_exit when ready to implement."
+    ))
+}
+
+async fn exec_plan_exit() -> Result<String> {
+    if !is_plan_mode() {
+        return Ok("Not currently in plan mode.".to_string());
+    }
+
+    PLAN_MODE.store(false, Ordering::Relaxed);
+
+    eprintln!(
+        "  {} Build mode activated — all tools now available",
+        "!".green().bold()
+    );
+
+    Ok("Plan mode deactivated. Build mode active — all tools are now available. \
+        Proceed with implementation."
+        .to_string())
+}
+
 /// Simple shell escape for arguments
 pub(crate) fn shell_escape(s: &str) -> String {
     if s.contains('\'') {
@@ -1996,8 +2581,8 @@ mod tests {
     #[test]
     fn test_tool_definitions_count() {
         let defs = get_tool_definitions();
-        // Base: 21 tools, +1 if BRAVE/TAVILY key set, +1 if OPENAI key set
-        assert!(defs.len() >= 21 && defs.len() <= 23);
+        // Base: 28 tools, +1 if BRAVE/TAVILY key set, +1 if OPENAI key set
+        assert!(defs.len() >= 28 && defs.len() <= 30, "got {} tools", defs.len());
     }
 
     #[test]
@@ -2856,5 +3441,571 @@ mod tests {
         assert_eq!(content, "written in oneshot mode");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ==============================
+    // Multi-Edit Tool Tests
+    // ==============================
+
+    #[test]
+    fn test_tool_definitions_include_new_tools() {
+        let defs = get_tool_definitions();
+        let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
+        assert!(names.contains(&"multiedit"), "missing multiedit");
+        assert!(names.contains(&"batch"), "missing batch");
+        assert!(names.contains(&"task"), "missing task");
+        assert!(names.contains(&"todowrite"), "missing todowrite");
+        assert!(names.contains(&"todoread"), "missing todoread");
+        assert!(names.contains(&"plan_enter"), "missing plan_enter");
+        assert!(names.contains(&"plan_exit"), "missing plan_exit");
+    }
+
+    #[tokio::test]
+    async fn test_multiedit_basic() {
+        let dir = crate::test_utils::tmp_dir("multiedit_basic");
+        let file = dir.join("test.txt");
+        std::fs::write(&file, "hello world\nfoo bar\nbaz qux\n").unwrap();
+
+        let args = serde_json::json!({
+            "path": file.display().to_string(),
+            "edits": [
+                {"old_string": "hello", "new_string": "HELLO"},
+                {"old_string": "foo", "new_string": "FOO"}
+            ]
+        });
+        let result = exec_multiedit(&args.to_string(), "test_session").await.unwrap();
+        assert!(result.contains("applied 2 edits"));
+
+        let content = std::fs::read_to_string(&file).unwrap();
+        assert!(content.contains("HELLO world"));
+        assert!(content.contains("FOO bar"));
+        assert!(content.contains("baz qux"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_multiedit_sequential_dependency() {
+        // Second edit depends on first edit's result
+        let dir = crate::test_utils::tmp_dir("multiedit_seq");
+        let file = dir.join("test.txt");
+        std::fs::write(&file, "aaa bbb ccc").unwrap();
+
+        let args = serde_json::json!({
+            "path": file.display().to_string(),
+            "edits": [
+                {"old_string": "aaa", "new_string": "xxx"},
+                {"old_string": "xxx bbb", "new_string": "REPLACED"}
+            ]
+        });
+        let result = exec_multiedit(&args.to_string(), "test_session").await.unwrap();
+        assert!(result.contains("applied 2 edits"));
+
+        let content = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(content, "REPLACED ccc");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_multiedit_empty_edits() {
+        let result = exec_multiedit(r#"{"path": "/tmp/x", "edits": []}"#, "test").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must not be empty"));
+    }
+
+    #[tokio::test]
+    async fn test_multiedit_not_found() {
+        let dir = crate::test_utils::tmp_dir("multiedit_nf");
+        let file = dir.join("test.txt");
+        std::fs::write(&file, "hello world").unwrap();
+
+        let args = serde_json::json!({
+            "path": file.display().to_string(),
+            "edits": [
+                {"old_string": "missing", "new_string": "replaced"}
+            ]
+        });
+        let result = exec_multiedit(&args.to_string(), "test").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_multiedit_replace_all() {
+        let dir = crate::test_utils::tmp_dir("multiedit_ra");
+        let file = dir.join("test.txt");
+        std::fs::write(&file, "aaa bbb aaa ccc aaa").unwrap();
+
+        let args = serde_json::json!({
+            "path": file.display().to_string(),
+            "edits": [
+                {"old_string": "aaa", "new_string": "XXX", "replace_all": true}
+            ]
+        });
+        let result = exec_multiedit(&args.to_string(), "test").await.unwrap();
+        assert!(result.contains("3 total replacements"));
+
+        let content = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(content, "XXX bbb XXX ccc XXX");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_multiedit_same_old_new() {
+        let dir = crate::test_utils::tmp_dir("multiedit_same");
+        let file = dir.join("test.txt");
+        std::fs::write(&file, "hello").unwrap();
+
+        let args = serde_json::json!({
+            "path": file.display().to_string(),
+            "edits": [
+                {"old_string": "hello", "new_string": "hello"}
+            ]
+        });
+        let result = exec_multiedit(&args.to_string(), "test").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must be different"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ==============================
+    // Batch Tool Tests
+    // ==============================
+
+    #[tokio::test]
+    async fn test_batch_parallel_reads() {
+        let dir = crate::test_utils::tmp_dir("batch_reads");
+        let f1 = dir.join("a.txt");
+        let f2 = dir.join("b.txt");
+        std::fs::write(&f1, "file A content").unwrap();
+        std::fs::write(&f2, "file B content").unwrap();
+
+        let perms = permissions_with_auto_approve();
+        let args = serde_json::json!({
+            "tool_calls": [
+                {"tool": "read", "parameters": {"path": f1.display().to_string()}},
+                {"tool": "read", "parameters": {"path": f2.display().to_string()}}
+            ]
+        });
+        let result = exec_batch(&args.to_string(), &perms, "test").await.unwrap();
+        assert!(result.contains("file A content"));
+        assert!(result.contains("file B content"));
+        assert!(result.contains("Batch executed 2 tool calls"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_batch_empty_calls() {
+        let perms = permissions_with_auto_approve();
+        let result = exec_batch(r#"{"tool_calls": []}"#, &perms, "test").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must not be empty"));
+    }
+
+    #[tokio::test]
+    async fn test_batch_too_many_calls() {
+        let perms = permissions_with_auto_approve();
+        let calls: Vec<serde_json::Value> = (0..26)
+            .map(|i| serde_json::json!({"tool": "read", "parameters": {"path": format!("/tmp/f{i}")}}))
+            .collect();
+        let args = serde_json::json!({"tool_calls": calls});
+        let result = exec_batch(&args.to_string(), &perms, "test").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Maximum is 25"));
+    }
+
+    #[tokio::test]
+    async fn test_batch_disallowed_nested() {
+        let perms = permissions_with_auto_approve();
+        let args = serde_json::json!({
+            "tool_calls": [
+                {"tool": "batch", "parameters": {"tool_calls": []}}
+            ]
+        });
+        let result = exec_batch(&args.to_string(), &perms, "test").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("cannot be used inside batch"));
+    }
+
+    #[tokio::test]
+    async fn test_batch_disallowed_task() {
+        let perms = permissions_with_auto_approve();
+        let args = serde_json::json!({
+            "tool_calls": [
+                {"tool": "task", "parameters": {"description": "test", "prompt": "test"}}
+            ]
+        });
+        let result = exec_batch(&args.to_string(), &perms, "test").await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("cannot be used inside batch"));
+    }
+
+    #[tokio::test]
+    async fn test_batch_mixed_success_failure() {
+        let dir = crate::test_utils::tmp_dir("batch_mixed");
+        let f1 = dir.join("exists.txt");
+        std::fs::write(&f1, "content").unwrap();
+
+        let perms = permissions_with_auto_approve();
+        let args = serde_json::json!({
+            "tool_calls": [
+                {"tool": "read", "parameters": {"path": f1.display().to_string()}},
+                {"tool": "read", "parameters": {"path": "/nonexistent/file.txt"}}
+            ]
+        });
+        let result = exec_batch(&args.to_string(), &perms, "test").await.unwrap();
+        assert!(result.contains("content"));
+        assert!(result.contains("Error"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ==============================
+    // Todo Tool Tests
+    // ==============================
+
+    #[tokio::test]
+    async fn test_todowrite_and_read() {
+        let session_id = format!("test_todo_{}", std::process::id());
+        let args = serde_json::json!({
+            "todos": [
+                {"content": "Implement feature A", "status": "pending", "priority": "high"},
+                {"content": "Write tests", "status": "in_progress", "priority": "medium"},
+                {"content": "Deploy", "status": "completed", "priority": "low"}
+            ]
+        });
+
+        let result = exec_todowrite(&args.to_string(), &session_id).await.unwrap();
+        assert!(result.contains("3 items"));
+
+        let read_result = exec_todoread(&session_id).await.unwrap();
+        assert!(read_result.contains("Implement feature A"));
+        assert!(read_result.contains("[HIGH]"));
+        assert!(read_result.contains("Write tests"));
+        assert!(read_result.contains("[~]")); // in_progress
+        assert!(read_result.contains("Deploy"));
+        assert!(read_result.contains("[x]")); // completed
+        assert!(read_result.contains("1 pending"));
+        assert!(read_result.contains("1 in progress"));
+        assert!(read_result.contains("1 completed"));
+
+        // Clean up
+        let _ = std::fs::remove_file(format!(".bfcode/sessions/{session_id}_todos.json"));
+    }
+
+    #[tokio::test]
+    async fn test_todoread_empty() {
+        let session_id = format!("test_todo_empty_{}", std::process::id());
+        let result = exec_todoread(&session_id).await.unwrap();
+        assert!(result.contains("No todos"));
+    }
+
+    #[tokio::test]
+    async fn test_todowrite_replace() {
+        let session_id = format!("test_todo_replace_{}", std::process::id());
+
+        // Write initial todos
+        let args1 = serde_json::json!({
+            "todos": [
+                {"content": "Task 1", "status": "pending"},
+                {"content": "Task 2", "status": "pending"}
+            ]
+        });
+        exec_todowrite(&args1.to_string(), &session_id).await.unwrap();
+
+        // Replace with new list
+        let args2 = serde_json::json!({
+            "todos": [
+                {"content": "Task 1", "status": "completed"},
+                {"content": "Task 2", "status": "in_progress"},
+                {"content": "Task 3", "status": "pending"}
+            ]
+        });
+        let result = exec_todowrite(&args2.to_string(), &session_id).await.unwrap();
+        assert!(result.contains("3 items"));
+
+        let read_result = exec_todoread(&session_id).await.unwrap();
+        assert!(read_result.contains("Task 3"));
+        assert!(read_result.contains("1 pending"));
+        assert!(read_result.contains("1 in progress"));
+        assert!(read_result.contains("1 completed"));
+
+        // Clean up
+        let _ = std::fs::remove_file(format!(".bfcode/sessions/{session_id}_todos.json"));
+    }
+
+    #[test]
+    fn test_format_todos() {
+        let items = vec![
+            TodoItem {
+                content: "High priority task".into(),
+                status: TodoStatus::Pending,
+                priority: TodoPriority::High,
+            },
+            TodoItem {
+                content: "Normal task".into(),
+                status: TodoStatus::InProgress,
+                priority: TodoPriority::Medium,
+            },
+            TodoItem {
+                content: "Done task".into(),
+                status: TodoStatus::Completed,
+                priority: TodoPriority::Low,
+            },
+            TodoItem {
+                content: "Cancelled task".into(),
+                status: TodoStatus::Cancelled,
+                priority: TodoPriority::Medium,
+            },
+        ];
+        let output = format_todos(&items);
+        assert!(output.contains("[ ] High priority task [HIGH]"));
+        assert!(output.contains("[~] Normal task"));
+        assert!(output.contains("[x] Done task [low]"));
+        assert!(output.contains("[-] Cancelled task"));
+        assert!(output.contains("1 pending"));
+        assert!(output.contains("1 in progress"));
+        assert!(output.contains("1 completed"));
+    }
+
+    // ==============================
+    // Plan Mode Tests
+    // ==============================
+
+    #[tokio::test]
+    async fn test_plan_enter_exit() {
+        // Ensure we start in build mode
+        PLAN_MODE.store(false, Ordering::Relaxed);
+        assert!(!is_plan_mode());
+
+        // Enter plan mode
+        let result = exec_plan_enter(r#"{"plan_name": "test-plan"}"#).await.unwrap();
+        assert!(result.contains("Plan mode activated"));
+        assert!(result.contains("test-plan"));
+        assert!(is_plan_mode());
+
+        // Double enter
+        let result = exec_plan_enter(r#"{}"#).await.unwrap();
+        assert!(result.contains("Already in plan mode"));
+
+        // Exit plan mode
+        let result = exec_plan_exit().await.unwrap();
+        assert!(result.contains("Build mode active"));
+        assert!(!is_plan_mode());
+
+        // Double exit
+        let result = exec_plan_exit().await.unwrap();
+        assert!(result.contains("Not currently in plan mode"));
+    }
+
+    #[tokio::test]
+    async fn test_plan_mode_blocks_write_tools() {
+        // Ensure we start in build mode, then enter plan mode
+        PLAN_MODE.store(false, Ordering::Relaxed);
+        let _ = exec_plan_enter(r#"{"plan_name": "blocking-test"}"#).await;
+        assert!(is_plan_mode());
+
+        let perms = permissions_with_auto_approve();
+
+        // Write should be blocked
+        let result = execute_tool(
+            "write",
+            r#"{"path": "/tmp/test.txt", "content": "blocked"}"#,
+            &perms,
+            "test",
+        ).await;
+        assert!(result.contains("disabled in plan mode"));
+
+        // Edit should be blocked
+        let result = execute_tool(
+            "edit",
+            r#"{"path": "/tmp/test.txt", "old_string": "a", "new_string": "b"}"#,
+            &perms,
+            "test",
+        ).await;
+        assert!(result.contains("disabled in plan mode"));
+
+        // Bash should be blocked
+        let result = execute_tool(
+            "bash",
+            r#"{"command": "echo hello"}"#,
+            &perms,
+            "test",
+        ).await;
+        assert!(result.contains("disabled in plan mode"));
+
+        // Read should still work
+        let dir = crate::test_utils::tmp_dir("plan_read");
+        let file = dir.join("readable.txt");
+        std::fs::write(&file, "can read this").unwrap();
+        let result = execute_tool(
+            "read",
+            &format!(r#"{{"path": "{}"}}"#, file.display()),
+            &perms,
+            "test",
+        ).await;
+        assert!(result.contains("can read this"));
+
+        // Clean up: exit plan mode
+        let _ = exec_plan_exit().await;
+        assert!(!is_plan_mode());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_plan_mode_allows_plan_writes() {
+        PLAN_MODE.store(false, Ordering::Relaxed);
+        let _ = exec_plan_enter(r#"{"plan_name": "write-test"}"#).await;
+
+        let dir = crate::test_utils::tmp_dir("plan_write");
+        let plan_dir = dir.join(".bfcode/plans");
+        std::fs::create_dir_all(&plan_dir).unwrap();
+        let plan_file = plan_dir.join("my-plan.md");
+
+        let perms = permissions_with_auto_approve();
+        let args = serde_json::json!({
+            "path": plan_file.display().to_string(),
+            "content": "# My Plan\n\nStep 1..."
+        }).to_string();
+        let result = execute_tool("write", &args, &perms, "test").await;
+        assert!(result.contains("Wrote"), "Expected write to succeed in plan dir, got: {result}");
+
+        // Clean up
+        let _ = exec_plan_exit().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ==============================
+    // Multiedit via execute_tool
+    // ==============================
+
+    #[tokio::test]
+    async fn test_execute_tool_multiedit() {
+        let dir = crate::test_utils::tmp_dir("exec_multiedit");
+        let file = dir.join("test.txt");
+        std::fs::write(&file, "alpha beta gamma").unwrap();
+
+        let perms = permissions_with_auto_approve();
+        let args = serde_json::json!({
+            "path": file.display().to_string(),
+            "edits": [
+                {"old_string": "alpha", "new_string": "ALPHA"},
+                {"old_string": "gamma", "new_string": "GAMMA"}
+            ]
+        });
+        let result = execute_tool("multiedit", &args.to_string(), &perms, "test").await;
+        assert!(result.contains("Multi-edited"));
+
+        let content = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(content, "ALPHA beta GAMMA");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ==============================
+    // Batch via execute_tool
+    // ==============================
+
+    #[tokio::test]
+    async fn test_execute_tool_batch() {
+        let dir = crate::test_utils::tmp_dir("exec_batch");
+        let f1 = dir.join("x.txt");
+        let f2 = dir.join("y.txt");
+        std::fs::write(&f1, "xxx").unwrap();
+        std::fs::write(&f2, "yyy").unwrap();
+
+        let perms = permissions_with_auto_approve();
+        let args = serde_json::json!({
+            "tool_calls": [
+                {"tool": "read", "parameters": {"path": f1.display().to_string()}},
+                {"tool": "read", "parameters": {"path": f2.display().to_string()}}
+            ]
+        });
+        let result = execute_tool("batch", &args.to_string(), &perms, "test").await;
+        assert!(result.contains("xxx"));
+        assert!(result.contains("yyy"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ==============================
+    // Argument Parsing Tests
+    // ==============================
+
+    #[test]
+    fn test_multiedit_args_parse() {
+        let json = r#"{"path": "/tmp/test.txt", "edits": [{"old_string": "a", "new_string": "b"}, {"old_string": "c", "new_string": "d", "replace_all": true}]}"#;
+        let args: MultiEditArgs = serde_json::from_str(json).unwrap();
+        assert_eq!(args.path, "/tmp/test.txt");
+        assert_eq!(args.edits.len(), 2);
+        assert_eq!(args.edits[0].old_string, "a");
+        assert_eq!(args.edits[1].replace_all, Some(true));
+    }
+
+    #[test]
+    fn test_batch_args_parse() {
+        let json = r#"{"tool_calls": [{"tool": "read", "parameters": {"path": "/tmp/x"}}, {"tool": "glob", "parameters": {"pattern": "*.rs"}}]}"#;
+        let args: BatchArgs = serde_json::from_str(json).unwrap();
+        assert_eq!(args.tool_calls.len(), 2);
+        assert_eq!(args.tool_calls[0].tool, "read");
+        assert_eq!(args.tool_calls[1].tool, "glob");
+    }
+
+    #[test]
+    fn test_task_args_parse() {
+        let json = r#"{"description": "explore codebase", "prompt": "Find all API endpoints", "subagent_type": "explore"}"#;
+        let args: TaskToolArgs = serde_json::from_str(json).unwrap();
+        assert_eq!(args.description, "explore codebase");
+        assert_eq!(args.subagent_type, Some("explore".to_string()));
+    }
+
+    #[test]
+    fn test_task_args_parse_minimal() {
+        let json = r#"{"description": "test", "prompt": "do something"}"#;
+        let args: TaskToolArgs = serde_json::from_str(json).unwrap();
+        assert_eq!(args.subagent_type, None);
+    }
+
+    #[test]
+    fn test_todowrite_args_parse() {
+        let json = r#"{"todos": [{"content": "task 1", "status": "pending", "priority": "high"}, {"content": "task 2", "status": "in_progress"}]}"#;
+        let args: TodoWriteArgs = serde_json::from_str(json).unwrap();
+        assert_eq!(args.todos.len(), 2);
+        assert_eq!(args.todos[0].priority, TodoPriority::High);
+        assert_eq!(args.todos[1].priority, TodoPriority::Medium); // default
+        assert_eq!(args.todos[1].status, TodoStatus::InProgress);
+    }
+
+    #[test]
+    fn test_plan_enter_args_parse() {
+        let json = r#"{"plan_name": "refactor-auth"}"#;
+        let args: PlanEnterArgs = serde_json::from_str(json).unwrap();
+        assert_eq!(args.plan_name, Some("refactor-auth".to_string()));
+
+        let json = r#"{}"#;
+        let args: PlanEnterArgs = serde_json::from_str(json).unwrap();
+        assert_eq!(args.plan_name, None);
+    }
+
+    #[test]
+    fn test_todo_status_serialization() {
+        let json = serde_json::to_string(&TodoStatus::InProgress).unwrap();
+        assert_eq!(json, r#""in_progress""#);
+        let parsed: TodoStatus = serde_json::from_str(r#""completed""#).unwrap();
+        assert_eq!(parsed, TodoStatus::Completed);
+    }
+
+    #[test]
+    fn test_todo_priority_serialization() {
+        let json = serde_json::to_string(&TodoPriority::High).unwrap();
+        assert_eq!(json, r#""high""#);
+        let parsed: TodoPriority = serde_json::from_str(r#""low""#).unwrap();
+        assert_eq!(parsed, TodoPriority::Low);
     }
 }

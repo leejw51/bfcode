@@ -32,3 +32,4 @@ path = "src/bin/bfcode_client.rs"
 
 [dev-dependencies]
 tempfile = "3"
+playwright = "0.0.20"
