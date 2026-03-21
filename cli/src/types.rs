@@ -91,6 +91,79 @@ pub fn context_limit_for_model(model: &str) -> u64 {
     get_provider_config(&provider).context_limit
 }
 
+/// Per-token cost in USD (per 1M tokens)
+#[derive(Debug, Clone)]
+pub struct ModelCost {
+    pub input_per_million: f64,
+    pub output_per_million: f64,
+}
+
+/// Get cost info for a model. Prices per 1M tokens (USD).
+pub fn model_cost(model: &str) -> ModelCost {
+    match model {
+        // Grok models
+        m if m.starts_with("grok-4-1-fast") => ModelCost { input_per_million: 3.0, output_per_million: 15.0 },
+        m if m.starts_with("grok-4-1") => ModelCost { input_per_million: 3.0, output_per_million: 15.0 },
+        m if m.starts_with("grok-3") => ModelCost { input_per_million: 3.0, output_per_million: 15.0 },
+        m if m.starts_with("grok") => ModelCost { input_per_million: 3.0, output_per_million: 15.0 },
+        // OpenAI models
+        m if m.starts_with("gpt-4o-mini") => ModelCost { input_per_million: 0.15, output_per_million: 0.60 },
+        m if m.starts_with("gpt-4o") => ModelCost { input_per_million: 2.50, output_per_million: 10.0 },
+        m if m.starts_with("gpt-4") => ModelCost { input_per_million: 30.0, output_per_million: 60.0 },
+        m if m.starts_with("o4-mini") => ModelCost { input_per_million: 1.10, output_per_million: 4.40 },
+        m if m.starts_with("o3-mini") => ModelCost { input_per_million: 1.10, output_per_million: 4.40 },
+        m if m.starts_with("o3") => ModelCost { input_per_million: 10.0, output_per_million: 40.0 },
+        m if m.starts_with("o1-mini") => ModelCost { input_per_million: 3.0, output_per_million: 12.0 },
+        m if m.starts_with("o1") => ModelCost { input_per_million: 15.0, output_per_million: 60.0 },
+        // Anthropic models
+        m if m.contains("opus") => ModelCost { input_per_million: 15.0, output_per_million: 75.0 },
+        m if m.contains("sonnet") => ModelCost { input_per_million: 3.0, output_per_million: 15.0 },
+        m if m.contains("haiku") => ModelCost { input_per_million: 0.25, output_per_million: 1.25 },
+        // Default fallback
+        _ => ModelCost { input_per_million: 3.0, output_per_million: 15.0 },
+    }
+}
+
+/// Calculate cost in USD from token counts
+pub fn calculate_cost(model: &str, input_tokens: u64, output_tokens: u64) -> f64 {
+    let cost = model_cost(model);
+    (input_tokens as f64 * cost.input_per_million / 1_000_000.0)
+        + (output_tokens as f64 * cost.output_per_million / 1_000_000.0)
+}
+
+/// Format cost as a readable string
+pub fn format_cost(cost: f64) -> String {
+    if cost < 0.01 {
+        format!("${:.4}", cost)
+    } else {
+        format!("${:.2}", cost)
+    }
+}
+
+/// Protected file patterns — prevent accidental writes to sensitive files
+pub const PROTECTED_FILE_PATTERNS: &[&str] = &[
+    ".env",
+    ".env.local",
+    ".env.production",
+    ".env.development",
+    ".env.staging",
+    ".env.test",
+    "credentials.json",
+    "secrets.json",
+    "secret.json",
+    "service-account.json",
+    ".npmrc",
+    ".pypirc",
+    "id_rsa",
+    "id_ed25519",
+    "id_ecdsa",
+    ".pem",
+    ".key",
+    ".p12",
+    ".pfx",
+    ".keystore",
+];
+
 // --- Chat Completion Request (OpenAI-compatible) ---
 
 #[derive(Serialize, Debug, Clone)]
@@ -103,6 +176,15 @@ pub struct ChatRequest {
     pub tools: Option<Vec<ToolDefinition>>,
 }
 
+/// An image attachment embedded in a message
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ImageAttachment {
+    /// Base64-encoded image data
+    pub data: String,
+    /// MIME type (e.g., "image/png", "image/jpeg")
+    pub media_type: String,
+}
+
 // Single Message struct with optional fields to handle all OpenAI message shapes
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Message {
@@ -113,6 +195,69 @@ pub struct Message {
     pub tool_calls: Option<Vec<ToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// Image attachments (stored for context, converted at API call time)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub images: Option<Vec<ImageAttachment>>,
+}
+
+impl Message {
+    /// Check if this message has image attachments
+    pub fn has_images(&self) -> bool {
+        self.images.as_ref().map(|v| !v.is_empty()).unwrap_or(false)
+    }
+
+    /// Convert to OpenAI JSON format (handles image content arrays)
+    pub fn to_openai_json(&self) -> serde_json::Value {
+        if self.has_images() && self.role == "user" {
+            let images = self.images.as_ref().unwrap();
+            let mut content_parts: Vec<serde_json::Value> = Vec::new();
+            if let Some(text) = &self.content {
+                content_parts.push(serde_json::json!({"type": "text", "text": text}));
+            }
+            for img in images {
+                content_parts.push(serde_json::json!({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": format!("data:{};base64,{}", img.media_type, img.data)
+                    }
+                }));
+            }
+            let mut obj = serde_json::json!({"role": self.role, "content": content_parts});
+            if let Some(tc) = &self.tool_calls {
+                obj["tool_calls"] = serde_json::to_value(tc).unwrap_or_default();
+            }
+            if let Some(id) = &self.tool_call_id {
+                obj["tool_call_id"] = serde_json::json!(id);
+            }
+            obj
+        } else {
+            serde_json::to_value(self).unwrap_or_default()
+        }
+    }
+
+    /// Convert to Anthropic JSON format (handles image content blocks)
+    pub fn to_anthropic_content(&self) -> serde_json::Value {
+        if self.has_images() && self.role == "user" {
+            let images = self.images.as_ref().unwrap();
+            let mut content_parts: Vec<serde_json::Value> = Vec::new();
+            if let Some(text) = &self.content {
+                content_parts.push(serde_json::json!({"type": "text", "text": text}));
+            }
+            for img in images {
+                content_parts.push(serde_json::json!({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": img.media_type,
+                        "data": img.data
+                    }
+                }));
+            }
+            serde_json::json!(content_parts)
+        } else {
+            serde_json::json!(self.content.as_deref().unwrap_or(""))
+        }
+    }
 }
 
 impl Message {
@@ -122,6 +267,7 @@ impl Message {
             content: Some(content.into()),
             tool_calls: None,
             tool_call_id: None,
+            images: None,
         }
     }
 
@@ -131,6 +277,18 @@ impl Message {
             content: Some(content.into()),
             tool_calls: None,
             tool_call_id: None,
+            images: None,
+        }
+    }
+
+    /// Create a user message with image attachments
+    pub fn user_with_images(content: &str, images: Vec<ImageAttachment>) -> Self {
+        Self {
+            role: "user".into(),
+            content: Some(content.into()),
+            tool_calls: None,
+            tool_call_id: None,
+            images: if images.is_empty() { None } else { Some(images) },
         }
     }
 
@@ -140,6 +298,7 @@ impl Message {
             content: Some(content.into()),
             tool_calls: None,
             tool_call_id: None,
+            images: None,
         }
     }
 
@@ -149,6 +308,7 @@ impl Message {
             content: None,
             tool_calls: Some(tool_calls),
             tool_call_id: None,
+            images: None,
         }
     }
 
@@ -158,6 +318,7 @@ impl Message {
             content: Some(content.into()),
             tool_calls: None,
             tool_call_id: Some(tool_call_id.into()),
+            images: None,
         }
     }
 }
@@ -428,6 +589,7 @@ pub const SYSTEM_PROMPT: &str = r#"You are bfcode (back to the future code), a c
 - glob: Find files matching a glob pattern (e.g. "**/*.rs", "src/**/*.ts").
 - grep: Search file contents with regex pattern. Returns matching lines with line numbers.
 - list_files: List files and directories at a path.
+- webfetch: Fetch content from a URL. HTML is auto-stripped to plain text. Use to read docs, web pages, or API responses.
 - memory_save: Save a context memory as a markdown file in .bfcode/memory/. Provide name (used as filename slug), description (one-line summary), memory_type (user|feedback|project|reference), and content (markdown body). Use this to remember important context across sessions.
 - memory_delete: Delete a context memory by name. Provide the name used when saving.
 - memory_list: List all saved context memories with their descriptions.
@@ -510,6 +672,11 @@ pub struct ListFilesArgs {
 #[derive(Deserialize, Debug)]
 pub struct ApplyPatchArgs {
     pub patch: String,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct WebFetchArgs {
+    pub url: String,
 }
 
 #[derive(Deserialize, Debug)]
@@ -873,5 +1040,209 @@ mod tests {
     #[test]
     fn test_system_prompt_includes_apply_patch() {
         assert!(SYSTEM_PROMPT.contains("apply_patch"));
+    }
+
+    #[test]
+    fn test_system_prompt_includes_webfetch() {
+        assert!(SYSTEM_PROMPT.contains("webfetch"));
+    }
+
+    #[test]
+    fn test_system_prompt_includes_memory_tools() {
+        assert!(SYSTEM_PROMPT.contains("memory_save"));
+        assert!(SYSTEM_PROMPT.contains("memory_delete"));
+        assert!(SYSTEM_PROMPT.contains("memory_list"));
+    }
+
+    // --- Cost tracking tests ---
+
+    #[test]
+    fn test_model_cost_grok() {
+        let cost = model_cost("grok-4-1-fast");
+        assert!(cost.input_per_million > 0.0);
+        assert!(cost.output_per_million > 0.0);
+    }
+
+    #[test]
+    fn test_model_cost_openai() {
+        let cost = model_cost("gpt-4o");
+        assert_eq!(cost.input_per_million, 2.5);
+        assert_eq!(cost.output_per_million, 10.0);
+    }
+
+    #[test]
+    fn test_model_cost_openai_mini() {
+        let cost = model_cost("gpt-4o-mini");
+        assert_eq!(cost.input_per_million, 0.15);
+    }
+
+    #[test]
+    fn test_model_cost_anthropic_sonnet() {
+        let cost = model_cost("claude-sonnet-4-20250514");
+        assert_eq!(cost.input_per_million, 3.0);
+        assert_eq!(cost.output_per_million, 15.0);
+    }
+
+    #[test]
+    fn test_model_cost_anthropic_opus() {
+        let cost = model_cost("claude-opus-4");
+        assert_eq!(cost.input_per_million, 15.0);
+        assert_eq!(cost.output_per_million, 75.0);
+    }
+
+    #[test]
+    fn test_model_cost_anthropic_haiku() {
+        let cost = model_cost("claude-haiku-3-5");
+        assert_eq!(cost.input_per_million, 0.25);
+    }
+
+    #[test]
+    fn test_calculate_cost() {
+        let cost = calculate_cost("gpt-4o", 1_000_000, 1_000_000);
+        assert!((cost - 12.5).abs() < 0.01); // $2.50 input + $10 output
+    }
+
+    #[test]
+    fn test_calculate_cost_small() {
+        let cost = calculate_cost("gpt-4o", 1000, 500);
+        assert!(cost > 0.0);
+        assert!(cost < 0.01);
+    }
+
+    #[test]
+    fn test_format_cost_small() {
+        assert_eq!(format_cost(0.0025), "$0.0025");
+    }
+
+    #[test]
+    fn test_format_cost_large() {
+        assert_eq!(format_cost(1.50), "$1.50");
+    }
+
+    // --- Protected files tests ---
+
+    #[test]
+    fn test_protected_file_patterns_not_empty() {
+        assert!(!PROTECTED_FILE_PATTERNS.is_empty());
+    }
+
+    #[test]
+    fn test_protected_file_patterns_includes_env() {
+        assert!(PROTECTED_FILE_PATTERNS.contains(&".env"));
+        assert!(PROTECTED_FILE_PATTERNS.contains(&".env.local"));
+    }
+
+    #[test]
+    fn test_protected_file_patterns_includes_keys() {
+        assert!(PROTECTED_FILE_PATTERNS.contains(&".pem"));
+        assert!(PROTECTED_FILE_PATTERNS.contains(&".key"));
+        assert!(PROTECTED_FILE_PATTERNS.contains(&"id_rsa"));
+    }
+
+    // --- Image attachment tests ---
+
+    #[test]
+    fn test_image_attachment_serialization() {
+        let img = ImageAttachment {
+            data: "base64data".into(),
+            media_type: "image/png".into(),
+        };
+        let json = serde_json::to_string(&img).unwrap();
+        assert!(json.contains("base64data"));
+        assert!(json.contains("image/png"));
+    }
+
+    #[test]
+    fn test_message_user_with_images() {
+        let img = ImageAttachment {
+            data: "abc".into(),
+            media_type: "image/jpeg".into(),
+        };
+        let msg = Message::user_with_images("describe this", vec![img]);
+        assert_eq!(msg.role, "user");
+        assert!(msg.has_images());
+        assert_eq!(msg.images.as_ref().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_message_user_with_no_images() {
+        let msg = Message::user_with_images("hello", vec![]);
+        assert!(!msg.has_images());
+        assert!(msg.images.is_none());
+    }
+
+    #[test]
+    fn test_message_has_images_false_for_normal() {
+        let msg = Message::user("hello");
+        assert!(!msg.has_images());
+    }
+
+    #[test]
+    fn test_message_to_openai_json_no_images() {
+        let msg = Message::user("hello");
+        let json = msg.to_openai_json();
+        assert_eq!(json["content"], "hello");
+    }
+
+    #[test]
+    fn test_message_to_openai_json_with_images() {
+        let img = ImageAttachment {
+            data: "AAAA".into(),
+            media_type: "image/png".into(),
+        };
+        let msg = Message::user_with_images("what is this?", vec![img]);
+        let json = msg.to_openai_json();
+        let content = json["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[1]["type"], "image_url");
+        assert!(content[1]["image_url"]["url"].as_str().unwrap().starts_with("data:image/png;base64,"));
+    }
+
+    #[test]
+    fn test_message_to_anthropic_content_no_images() {
+        let msg = Message::user("hello");
+        let content = msg.to_anthropic_content();
+        assert_eq!(content, "hello");
+    }
+
+    #[test]
+    fn test_message_to_anthropic_content_with_images() {
+        let img = ImageAttachment {
+            data: "BBBB".into(),
+            media_type: "image/jpeg".into(),
+        };
+        let msg = Message::user_with_images("describe", vec![img]);
+        let content = msg.to_anthropic_content();
+        let arr = content.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["type"], "text");
+        assert_eq!(arr[1]["type"], "image");
+        assert_eq!(arr[1]["source"]["type"], "base64");
+        assert_eq!(arr[1]["source"]["media_type"], "image/jpeg");
+    }
+
+    #[test]
+    fn test_message_serialization_skips_images_none() {
+        let msg = Message::user("hi");
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(!json.contains("images"));
+    }
+
+    // --- MemoryType tests ---
+
+    #[test]
+    fn test_memory_type_display() {
+        assert_eq!(MemoryType::User.to_string(), "user");
+        assert_eq!(MemoryType::Feedback.to_string(), "feedback");
+        assert_eq!(MemoryType::Project.to_string(), "project");
+        assert_eq!(MemoryType::Reference.to_string(), "reference");
+    }
+
+    #[test]
+    fn test_webfetch_args() {
+        let json = r#"{"url": "https://example.com"}"#;
+        let args: WebFetchArgs = serde_json::from_str(json).unwrap();
+        assert_eq!(args.url, "https://example.com");
     }
 }

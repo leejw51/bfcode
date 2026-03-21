@@ -138,6 +138,20 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         ToolDefinition {
             tool_type: "function".into(),
             function: FunctionSchema {
+                name: "webfetch".into(),
+                description: "Fetch content from a URL. HTML is automatically stripped to plain text. Use this to read documentation, web pages, or API responses.".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "url": {"type": "string", "description": "URL to fetch"}
+                    },
+                    "required": ["url"]
+                }),
+            },
+        },
+        ToolDefinition {
+            tool_type: "function".into(),
+            function: FunctionSchema {
                 name: "memory_save".into(),
                 description: "Save a context memory as a markdown file. Saved to .bfcode/memory/ by default, or to a specific folder. Use this to remember important context across sessions.".into(),
                 parameters: serde_json::json!({
@@ -259,6 +273,13 @@ pub async fn execute_tool(
     permissions: &Permissions,
     session_id: &str,
 ) -> String {
+    // Check protected files for write/edit/apply_patch
+    if matches!(name, "write" | "edit" | "apply_patch") {
+        if let Some(msg) = check_protected_file(name, arguments) {
+            return msg;
+        }
+    }
+
     // Check permissions for dangerous tools
     let needs_permission = matches!(name, "bash" | "write" | "edit" | "apply_patch" | "memory_save" | "memory_delete");
     if needs_permission {
@@ -282,6 +303,7 @@ pub async fn execute_tool(
         "grep" => exec_grep(arguments).await,
         "list_files" => exec_list_files(arguments).await,
         "apply_patch" => exec_apply_patch(arguments, session_id).await,
+        "webfetch" => exec_webfetch(arguments).await,
         "memory_save" => exec_memory_save(arguments).await,
         "memory_delete" => exec_memory_delete(arguments).await,
         "memory_list" => exec_memory_list().await,
@@ -756,6 +778,197 @@ async fn exec_memory_list() -> Result<String> {
     Ok(output)
 }
 
+// --- Protected Files ---
+
+/// Check if a tool is trying to modify a protected file. Returns error message if blocked.
+fn check_protected_file(tool_name: &str, arguments: &str) -> Option<String> {
+    let path = match tool_name {
+        "write" | "edit" => {
+            serde_json::from_str::<serde_json::Value>(arguments)
+                .ok()
+                .and_then(|v| v.get("path")?.as_str().map(|s| s.to_string()))
+        }
+        "apply_patch" => {
+            // Check all files in the patch
+            let v = serde_json::from_str::<serde_json::Value>(arguments).ok()?;
+            let patch = v.get("patch")?.as_str()?;
+            for line in patch.lines() {
+                if line.starts_with("+++ ") {
+                    let file_path = line.trim_start_matches("+++ ").trim_start_matches("b/");
+                    if is_protected_path(file_path) {
+                        return Some(format!(
+                            "Error: Refusing to modify protected file '{}'. \
+                             This file may contain secrets or credentials. \
+                             If you need to modify it, ask the user to do so manually.",
+                            file_path
+                        ));
+                    }
+                }
+            }
+            return None;
+        }
+        _ => return None,
+    };
+
+    if let Some(ref path) = path {
+        if is_protected_path(path) {
+            return Some(format!(
+                "Error: Refusing to modify protected file '{}'. \
+                 This file may contain secrets or credentials. \
+                 If you need to modify it, ask the user to do so manually.",
+                path
+            ));
+        }
+    }
+    None
+}
+
+/// Check if a file path matches any protected pattern
+fn is_protected_path(path: &str) -> bool {
+    let filename = std::path::Path::new(path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    for pattern in crate::types::PROTECTED_FILE_PATTERNS {
+        // Match by filename
+        if filename == *pattern {
+            return true;
+        }
+        // Match by extension (for .pem, .key, etc.)
+        if pattern.starts_with('.') && filename.ends_with(pattern) {
+            return true;
+        }
+        // Match if the path contains the pattern as a component
+        if path.ends_with(pattern) {
+            return true;
+        }
+    }
+    false
+}
+
+// --- Web Fetch Tool ---
+
+async fn exec_webfetch(arguments: &str) -> Result<String> {
+    let args: WebFetchArgs = serde_json::from_str(arguments)?;
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .build()?;
+
+    let response = client.get(&args.url).send().await
+        .with_context(|| format!("Failed to fetch {}", args.url))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        return Ok(format!("HTTP {} {}", status.as_u16(), status.canonical_reason().unwrap_or("")));
+    }
+
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
+    let body = response.text().await?;
+
+    // If HTML, strip tags to get text content
+    let text = if content_type.contains("html") {
+        strip_html_tags(&body)
+    } else {
+        body
+    };
+
+    // Truncate to avoid flooding context
+    let max_chars = 50_000;
+    if text.len() > max_chars {
+        Ok(format!(
+            "{}\n\n[Truncated — {} chars total, showing first {}]",
+            &text[..max_chars],
+            text.len(),
+            max_chars
+        ))
+    } else {
+        Ok(text)
+    }
+}
+
+/// Simple HTML tag stripping — removes tags, decodes common entities, collapses whitespace
+fn strip_html_tags(html: &str) -> String {
+    let mut text = html.to_string();
+
+    // Remove script and style blocks (case insensitive)
+    loop {
+        let lower = text.to_lowercase();
+        if let Some(start) = lower.find("<script") {
+            if let Some(end) = lower[start..].find("</script") {
+                if let Some(close) = lower[start + end..].find('>') {
+                    text = format!("{}{}", &text[..start], &text[start + end + close + 1..]);
+                    continue;
+                }
+            }
+            // Malformed — remove from <script to end
+            text = text[..start].to_string();
+        }
+        break;
+    }
+    loop {
+        let lower = text.to_lowercase();
+        if let Some(start) = lower.find("<style") {
+            if let Some(end) = lower[start..].find("</style") {
+                if let Some(close) = lower[start + end..].find('>') {
+                    text = format!("{}{}", &text[..start], &text[start + end + close + 1..]);
+                    continue;
+                }
+            }
+            text = text[..start].to_string();
+        }
+        break;
+    }
+
+    // Remove all HTML tags
+    let mut result = String::with_capacity(text.len());
+    let mut in_tag = false;
+    for ch in text.chars() {
+        if ch == '<' {
+            in_tag = true;
+        } else if ch == '>' {
+            in_tag = false;
+        } else if !in_tag {
+            result.push(ch);
+        }
+    }
+
+    // Decode common HTML entities
+    let result = result
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&apos;", "'")
+        .replace("&nbsp;", " ");
+
+    // Collapse whitespace
+    let mut collapsed = String::with_capacity(result.len());
+    let mut prev_whitespace = false;
+    for ch in result.chars() {
+        if ch.is_whitespace() {
+            if !prev_whitespace {
+                collapsed.push(if ch == '\n' { '\n' } else { ' ' });
+            }
+            prev_whitespace = true;
+        } else {
+            collapsed.push(ch);
+            prev_whitespace = false;
+        }
+    }
+
+    collapsed.trim().to_string()
+}
+
 // --- File Snapshot Helper ---
 
 /// Save a snapshot of a file before modification (for undo support)
@@ -1089,7 +1302,7 @@ mod tests {
     #[test]
     fn test_tool_definitions_count() {
         let defs = get_tool_definitions();
-        assert_eq!(defs.len(), 11);
+        assert_eq!(defs.len(), 12);
     }
 
     #[test]
@@ -1722,5 +1935,138 @@ mod tests {
         let args = r#"{"patch": "--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n--- a/b.txt\n+++ b/b.txt\n@@ -1 +1 @@\n-x\n+y"}"#;
         let summary = tool_permission_summary("apply_patch", args);
         assert!(summary.contains("2 file(s)"));
+    }
+
+    // ── Protected files ─────────────────────────────────────────────
+
+    #[test]
+    fn test_is_protected_env() {
+        assert!(is_protected_path(".env"));
+        assert!(is_protected_path(".env.local"));
+        assert!(is_protected_path(".env.production"));
+        assert!(is_protected_path("config/.env"));
+    }
+
+    #[test]
+    fn test_is_protected_keys() {
+        assert!(is_protected_path("id_rsa"));
+        assert!(is_protected_path("~/.ssh/id_rsa"));
+        assert!(is_protected_path("server.pem"));
+        assert!(is_protected_path("cert.key"));
+        assert!(is_protected_path("keystore.p12"));
+    }
+
+    #[test]
+    fn test_is_protected_credentials() {
+        assert!(is_protected_path("credentials.json"));
+        assert!(is_protected_path("secrets.json"));
+        assert!(is_protected_path("service-account.json"));
+    }
+
+    #[test]
+    fn test_not_protected_normal_files() {
+        assert!(!is_protected_path("main.rs"));
+        assert!(!is_protected_path("src/lib.rs"));
+        assert!(!is_protected_path("config.json"));
+        assert!(!is_protected_path("Cargo.toml"));
+        assert!(!is_protected_path("README.md"));
+    }
+
+    #[test]
+    fn test_check_protected_file_write() {
+        let args = r#"{"path": ".env", "content": "SECRET=abc"}"#;
+        let result = check_protected_file("write", args);
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("protected"));
+    }
+
+    #[test]
+    fn test_check_protected_file_edit() {
+        let args = r#"{"path": ".env.local", "old_string": "a", "new_string": "b"}"#;
+        let result = check_protected_file("edit", args);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_check_protected_file_normal() {
+        let args = r#"{"path": "src/main.rs", "content": "fn main() {}"}"#;
+        let result = check_protected_file("write", args);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_check_protected_file_patch() {
+        let args = r#"{"patch": "--- a/.env\n+++ b/.env\n@@ -1 +1 @@\n-old\n+new"}"#;
+        let result = check_protected_file("apply_patch", args);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_check_protected_file_patch_normal() {
+        let args = r#"{"patch": "--- a/main.rs\n+++ b/main.rs\n@@ -1 +1 @@\n-old\n+new"}"#;
+        let result = check_protected_file("apply_patch", args);
+        assert!(result.is_none());
+    }
+
+    // ── HTML stripping ──────────────────────────────────────────────
+
+    #[test]
+    fn test_strip_html_tags_simple() {
+        assert_eq!(strip_html_tags("<p>hello</p>"), "hello");
+    }
+
+    #[test]
+    fn test_strip_html_tags_nested() {
+        assert_eq!(strip_html_tags("<div><p>hello <b>world</b></p></div>"), "hello world");
+    }
+
+    #[test]
+    fn test_strip_html_tags_entities() {
+        assert_eq!(strip_html_tags("a &amp; b &lt; c"), "a & b < c");
+    }
+
+    #[test]
+    fn test_strip_html_tags_script_removed() {
+        let html = "<p>hello</p><script>alert('xss')</script><p>world</p>";
+        let result = strip_html_tags(html);
+        assert!(result.contains("hello"));
+        assert!(result.contains("world"));
+        assert!(!result.contains("alert"));
+    }
+
+    #[test]
+    fn test_strip_html_tags_style_removed() {
+        let html = "<style>.foo { color: red; }</style><p>content</p>";
+        let result = strip_html_tags(html);
+        assert!(result.contains("content"));
+        assert!(!result.contains("color"));
+    }
+
+    #[test]
+    fn test_strip_html_tags_plain_text() {
+        assert_eq!(strip_html_tags("just plain text"), "just plain text");
+    }
+
+    #[test]
+    fn test_strip_html_collapses_whitespace() {
+        let result = strip_html_tags("<p>hello</p>  <p>world</p>");
+        // Should not have excessive whitespace
+        assert!(!result.contains("  "));
+    }
+
+    // ── Tool definitions include new tools ───────────────────────────
+
+    #[test]
+    fn test_tool_definitions_includes_webfetch() {
+        let defs = get_tool_definitions();
+        assert!(defs.iter().any(|d| d.function.name == "webfetch"));
+    }
+
+    #[test]
+    fn test_tool_definitions_includes_memory_tools() {
+        let defs = get_tool_definitions();
+        assert!(defs.iter().any(|d| d.function.name == "memory_save"));
+        assert!(defs.iter().any(|d| d.function.name == "memory_delete"));
+        assert!(defs.iter().any(|d| d.function.name == "memory_list"));
     }
 }

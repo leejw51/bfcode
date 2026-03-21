@@ -91,6 +91,36 @@ impl OpenAICompatibleClient {
         }
     }
 
+    /// Build request JSON, handling image content arrays for vision
+    fn build_request_json(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        model: &str,
+        temperature: f64,
+        stream: bool,
+    ) -> serde_json::Value {
+        let has_images = messages.iter().any(|m| m.has_images());
+        if !has_images {
+            // Fast path: standard serialization
+            let req = self.build_request(messages, tools, model, temperature, stream);
+            return serde_json::to_value(&req).unwrap_or_default();
+        }
+
+        // Slow path: manually build JSON with image content arrays
+        let msgs: Vec<serde_json::Value> = messages.iter().map(|m| m.to_openai_json()).collect();
+        let mut obj = serde_json::json!({
+            "model": model,
+            "messages": msgs,
+            "stream": stream,
+            "temperature": temperature,
+        });
+        if !tools.is_empty() {
+            obj["tools"] = serde_json::to_value(tools).unwrap_or_default();
+        }
+        obj
+    }
+
     async fn send_request(&self, request: &ChatRequest) -> Result<reqwest::Response> {
         let mut last_error = String::new();
 
@@ -140,6 +170,57 @@ impl OpenAICompatibleClient {
 
         bail!("Max retries exceeded. Last error: {last_error}");
     }
+
+    /// Send request with raw JSON body (for image content arrays)
+    async fn send_request_json(&self, body: &serde_json::Value) -> Result<reqwest::Response> {
+        let mut last_error = String::new();
+
+        for attempt in 0..=MAX_RETRIES {
+            if attempt > 0 {
+                let delay = RETRY_INITIAL_DELAY_MS * RETRY_BACKOFF_FACTOR.pow(attempt - 1);
+                eprintln!(
+                    "  Retrying in {}s (attempt {}/{})...",
+                    delay / 1000,
+                    attempt + 1,
+                    MAX_RETRIES + 1
+                );
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+            }
+
+            let response = match self
+                .client
+                .post(&self.api_url)
+                .header("Content-Type", "application/json")
+                .header("Authorization", format!("Bearer {}", self.api_key))
+                .json(body)
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    last_error = format!("Network error: {e}");
+                    if e.is_timeout() || e.is_connect() {
+                        continue;
+                    }
+                    bail!("{last_error}");
+                }
+            };
+
+            let status = response.status();
+            if status.is_success() {
+                return Ok(response);
+            }
+
+            let resp_body = response.text().await.unwrap_or_default();
+            if status.as_u16() == 429 || status.is_server_error() {
+                last_error = format!("API error {status}: {resp_body}");
+                continue;
+            }
+            bail!("API error {status}: {resp_body}");
+        }
+
+        bail!("Max retries exceeded. Last error: {last_error}");
+    }
 }
 
 #[async_trait::async_trait]
@@ -151,8 +232,14 @@ impl ChatClient for OpenAICompatibleClient {
         model: &str,
         temperature: f64,
     ) -> Result<ChatResponse> {
-        let request = self.build_request(messages, tools, model, temperature, false);
-        let response = self.send_request(&request).await?;
+        let has_images = messages.iter().any(|m| m.has_images());
+        let response = if has_images {
+            let json = self.build_request_json(messages, tools, model, temperature, false);
+            self.send_request_json(&json).await?
+        } else {
+            let request = self.build_request(messages, tools, model, temperature, false);
+            self.send_request(&request).await?
+        };
         let body = response.text().await?;
         let chat_response: ChatResponse = serde_json::from_str(&body)
             .with_context(|| format!("Failed to parse response: {}", &body[..body.len().min(500)]))?;
@@ -167,8 +254,14 @@ impl ChatClient for OpenAICompatibleClient {
         temperature: f64,
         tx: tokio::sync::mpsc::UnboundedSender<StreamChunk>,
     ) -> Result<ChatResponse> {
-        let request = self.build_request(messages, tools, model, temperature, true);
-        let response = self.send_request(&request).await?;
+        let has_images = messages.iter().any(|m| m.has_images());
+        let response = if has_images {
+            let json = self.build_request_json(messages, tools, model, temperature, true);
+            self.send_request_json(&json).await?
+        } else {
+            let request = self.build_request(messages, tools, model, temperature, true);
+            self.send_request(&request).await?
+        };
 
         let mut accumulated_text = String::new();
         let mut accumulated_tool_calls: Vec<ToolCall> = vec![];
@@ -320,7 +413,7 @@ impl AnthropicClient {
                 "user" => {
                     anthropic_messages.push(AnthropicMessage {
                         role: "user".into(),
-                        content: serde_json::json!(msg.content.as_deref().unwrap_or("")),
+                        content: msg.to_anthropic_content(),
                     });
                 }
                 "assistant" => {

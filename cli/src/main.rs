@@ -705,7 +705,18 @@ async fn process_user_message(
     }
     session.updated_at = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
-    session.conversation.push(Message::user(input));
+    // Extract image attachments from input (e.g., @image.png or paths ending in image extensions)
+    let (clean_input, images) = extract_images(input);
+    if !images.is_empty() {
+        eprintln!(
+            "  {} Attached {} image(s)",
+            "+".green(),
+            images.len()
+        );
+        session.conversation.push(Message::user_with_images(&clean_input, images));
+    } else {
+        session.conversation.push(Message::user(input));
+    }
 
     // Token-aware auto-compaction
     let estimated = context::estimate_conversation_tokens(&session.conversation);
@@ -814,13 +825,19 @@ async fn process_user_message(
             session.conversation.push(Message::assistant_text(content));
         }
 
-        // Show token usage
+        // Show token usage and cost
         if let Some(usage) = &response.usage {
+            let cost = types::calculate_cost(
+                &config.model,
+                usage.prompt_tokens,
+                usage.completion_tokens,
+            );
             eprintln!(
-                "  {} tokens: {} this call | {} session total",
+                "  {} tokens: {} this call | {} session total | cost: {}",
                 "~".dimmed(),
                 format_tokens(usage.total_tokens).dimmed(),
                 format_tokens(session.total_tokens).dimmed(),
+                types::format_cost(cost).dimmed(),
             );
         }
 
@@ -1078,6 +1095,122 @@ fn start_spinner(running: Arc<AtomicBool>) -> tokio::task::JoinHandle<()> {
 }
 
 // --- Helpers ---
+
+/// Extract image file paths from user input.
+/// Supports @path/to/image.png syntax and bare image paths.
+/// Returns (cleaned text, list of ImageAttachments).
+fn extract_images(input: &str) -> (String, Vec<types::ImageAttachment>) {
+    let image_extensions = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"];
+    let mut images = Vec::new();
+    let mut clean_parts = Vec::new();
+
+    for word in input.split_whitespace() {
+        let path_str = word.trim_start_matches('@');
+        let lower = path_str.to_lowercase();
+        let is_image = image_extensions.iter().any(|ext| lower.ends_with(ext));
+
+        if is_image && std::path::Path::new(path_str).exists() {
+            if let Ok(data) = std::fs::read(path_str) {
+                let base64_data = base64_encode(&data);
+                let media_type = if lower.ends_with(".png") {
+                    "image/png"
+                } else if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+                    "image/jpeg"
+                } else if lower.ends_with(".gif") {
+                    "image/gif"
+                } else if lower.ends_with(".webp") {
+                    "image/webp"
+                } else {
+                    "image/png"
+                };
+                images.push(types::ImageAttachment {
+                    data: base64_data,
+                    media_type: media_type.to_string(),
+                });
+                clean_parts.push(format!("[image: {}]", path_str));
+                continue;
+            }
+        }
+        clean_parts.push(word.to_string());
+    }
+
+    let clean_text = clean_parts.join(" ");
+    (clean_text, images)
+}
+
+/// Base64 encode bytes (no external dep needed — use simple encoder)
+fn base64_encode(data: &[u8]) -> String {
+    use std::io::Write;
+    let mut buf = Vec::new();
+    {
+        let mut encoder = Base64Encoder::new(&mut buf);
+        encoder.write_all(data).unwrap();
+        encoder.finish().unwrap();
+    }
+    String::from_utf8(buf).unwrap()
+}
+
+/// Minimal base64 encoder
+struct Base64Encoder<W: std::io::Write> {
+    writer: W,
+    buf: [u8; 3],
+    buf_len: usize,
+}
+
+const B64_CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+impl<W: std::io::Write> Base64Encoder<W> {
+    fn new(writer: W) -> Self {
+        Self { writer, buf: [0; 3], buf_len: 0 }
+    }
+
+    fn encode_block(&mut self) -> std::io::Result<()> {
+        let b = &self.buf;
+        let n = self.buf_len;
+        if n == 0 { return Ok(()); }
+
+        let mut out = [b'='; 4];
+        out[0] = B64_CHARS[(b[0] >> 2) as usize];
+        if n >= 1 {
+            out[1] = B64_CHARS[((b[0] & 0x03) << 4 | if n > 1 { b[1] >> 4 } else { 0 }) as usize];
+        }
+        if n >= 2 {
+            out[2] = B64_CHARS[((b[1] & 0x0f) << 2 | if n > 2 { b[2] >> 6 } else { 0 }) as usize];
+        }
+        if n >= 3 {
+            out[3] = B64_CHARS[(b[2] & 0x3f) as usize];
+        }
+        self.writer.write_all(&out)?;
+        self.buf_len = 0;
+        Ok(())
+    }
+
+    fn finish(mut self) -> std::io::Result<()> {
+        if self.buf_len > 0 {
+            self.encode_block()?;
+        }
+        Ok(())
+    }
+}
+
+impl<W: std::io::Write> std::io::Write for Base64Encoder<W> {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        let mut i = 0;
+        while i < data.len() {
+            self.buf[self.buf_len] = data[i];
+            self.buf_len += 1;
+            if self.buf_len == 3 {
+                self.encode_block()?;
+            }
+            i += 1;
+        }
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.writer.flush()
+    }
+}
 
 pub(crate) fn format_tokens(tokens: u64) -> String {
     if tokens >= 1_000_000 {
@@ -1527,6 +1660,79 @@ mod tests {
         assert_eq!(format_tokens(500), "500");
         assert_eq!(format_tokens(1_500), "1.5K");
         assert_eq!(format_tokens(1_500_000), "1.5M");
+    }
+
+    // ── Base64 encoder ──────────────────────────────────────────────
+
+    #[test]
+    fn test_base64_encode_empty() {
+        assert_eq!(base64_encode(&[]), "");
+    }
+
+    #[test]
+    fn test_base64_encode_hello() {
+        assert_eq!(base64_encode(b"Hello"), "SGVsbG8=");
+    }
+
+    #[test]
+    fn test_base64_encode_padding() {
+        assert_eq!(base64_encode(b"a"), "YQ==");
+        assert_eq!(base64_encode(b"ab"), "YWI=");
+        assert_eq!(base64_encode(b"abc"), "YWJj");
+    }
+
+    #[test]
+    fn test_base64_encode_binary() {
+        let data = vec![0u8, 1, 2, 255, 254, 253];
+        let encoded = base64_encode(&data);
+        assert!(!encoded.is_empty());
+        // Verify it's valid base64 chars
+        assert!(encoded.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '='));
+    }
+
+    // ── Image extraction ────────────────────────────────────────────
+
+    #[test]
+    fn test_extract_images_no_images() {
+        let (text, images) = extract_images("hello world");
+        assert_eq!(text, "hello world");
+        assert!(images.is_empty());
+    }
+
+    #[test]
+    fn test_extract_images_nonexistent_file() {
+        let (text, images) = extract_images("look at @nonexistent.png");
+        assert!(text.contains("@nonexistent.png"));
+        assert!(images.is_empty());
+    }
+
+    #[test]
+    fn test_extract_images_existing_file() {
+        with_tmp(|| {
+            // Create a tiny PNG file (1x1 pixel)
+            let png_data = vec![
+                0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, // PNG header
+                0x00, 0x00, 0x00, 0x0D, // IHDR length
+            ];
+            std::fs::write("test.png", &png_data).unwrap();
+
+            let (text, images) = extract_images("describe @test.png please");
+            assert!(text.contains("[image: test.png]"));
+            assert!(text.contains("please"));
+            assert_eq!(images.len(), 1);
+            assert_eq!(images[0].media_type, "image/png");
+            assert!(!images[0].data.is_empty());
+        });
+    }
+
+    #[test]
+    fn test_extract_images_jpeg() {
+        with_tmp(|| {
+            std::fs::write("photo.jpg", b"fake jpeg").unwrap();
+            let (_, images) = extract_images("@photo.jpg");
+            assert_eq!(images.len(), 1);
+            assert_eq!(images[0].media_type, "image/jpeg");
+        });
     }
 
     // ── Compact with structured summary ──────────────────────────────
