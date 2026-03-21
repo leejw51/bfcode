@@ -5,14 +5,12 @@ use crossterm::{
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{
+    Frame, Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{
-        Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
-    },
-    Frame, Terminal,
+    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
 };
 use std::io;
 
@@ -353,8 +351,8 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
 
     // Scrollbar
     if total_lines > inner_height {
-        let mut scrollbar_state = ScrollbarState::new(max_scroll as usize)
-            .position(scroll as usize);
+        let mut scrollbar_state =
+            ScrollbarState::new(max_scroll as usize).position(scroll as usize);
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(Some("^"))
             .end_symbol(Some("v"));
@@ -401,9 +399,7 @@ fn render_message<'a>(msg: &'a ChatMessage, _max_width: u16) -> Vec<Line<'a>> {
         Style::default()
     };
 
-    let code_style = Style::default()
-        .fg(Color::White)
-        .bg(Color::Rgb(40, 40, 40));
+    let code_style = Style::default().fg(Color::White).bg(Color::Rgb(40, 40, 40));
 
     let mut result: Vec<Line<'a>> = Vec::new();
     let mut in_code_block = false;
@@ -422,10 +418,7 @@ fn render_message<'a>(msg: &'a ChatMessage, _max_width: u16) -> Vec<Line<'a>> {
                 ]));
                 first_line = false;
             } else {
-                result.push(Line::from(Span::styled(
-                    raw_line.to_string(),
-                    fence_style,
-                )));
+                result.push(Line::from(Span::styled(raw_line.to_string(), fence_style)));
             }
             continue;
         }

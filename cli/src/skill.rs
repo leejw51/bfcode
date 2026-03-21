@@ -84,10 +84,7 @@ pub fn find_skill<'a>(skills: &'a [Skill], query: &str) -> Option<&'a Skill> {
     let query_lower = query.to_lowercase();
 
     // Prefer exact match first
-    if let Some(skill) = skills
-        .iter()
-        .find(|s| s.name.to_lowercase() == query_lower)
-    {
+    if let Some(skill) = skills.iter().find(|s| s.name.to_lowercase() == query_lower) {
         return Some(skill);
     }
 
@@ -125,7 +122,11 @@ pub fn format_skills_list(skills: &[Skill]) -> String {
         } else {
             "project".green()
         };
-        out.push_str(&format!("     [{}] {}\n", source, skill.path.display().to_string().dimmed()));
+        out.push_str(&format!(
+            "     [{}] {}\n",
+            source,
+            skill.path.display().to_string().dimmed()
+        ));
         out.push('\n');
     }
 
@@ -374,9 +375,7 @@ fn parse_skill_file(path: &Path) -> Option<Skill> {
 fn strip_quotes(s: &str) -> String {
     let s = s.trim();
     if s.len() >= 2 {
-        if (s.starts_with('"') && s.ends_with('"'))
-            || (s.starts_with('\'') && s.ends_with('\''))
-        {
+        if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')) {
             return s[1..s.len() - 1].to_string();
         }
     }

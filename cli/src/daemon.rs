@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use colored::Colorize;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -97,11 +97,7 @@ pub struct UpdateInfo {
 fn read_running_pid(pid_file: &str) -> Option<u32> {
     let content = std::fs::read_to_string(pid_file).ok()?;
     let pid: u32 = content.trim().parse().ok()?;
-    if process_alive(pid) {
-        Some(pid)
-    } else {
-        None
-    }
+    if process_alive(pid) { Some(pid) } else { None }
 }
 
 /// Check whether a process is still alive using `kill -0`.
@@ -293,11 +289,7 @@ pub async fn check_for_updates() -> Result<Option<UpdateInfo>> {
         .context("failed to reach GitHub releases API")?;
 
     if !resp.status().is_success() {
-        bail!(
-            "GitHub API returned status {} for {}",
-            resp.status(),
-            url
-        );
+        bail!("GitHub API returned status {} for {}", resp.status(), url);
     }
 
     let release: GitHubRelease = resp
@@ -373,10 +365,8 @@ pub async fn self_update(info: &UpdateInfo) -> Result<()> {
     // Atomic-ish rename.
     let backup = current_exe.with_extension("old");
     let _ = std::fs::remove_file(&backup);
-    std::fs::rename(&current_exe, &backup)
-        .context("failed to back up current binary")?;
-    std::fs::rename(&tmp_path, &current_exe)
-        .context("failed to move new binary into place")?;
+    std::fs::rename(&current_exe, &backup).context("failed to back up current binary")?;
+    std::fs::rename(&tmp_path, &current_exe).context("failed to move new binary into place")?;
     let _ = std::fs::remove_file(&backup);
 
     println!(
@@ -655,10 +645,7 @@ pub fn format_status(status: &DaemonStatus) -> String {
             .pid
             .map(|p| p.to_string())
             .unwrap_or_else(|| "?".into());
-        let uptime = status
-            .uptime
-            .as_deref()
-            .unwrap_or("unknown");
+        let uptime = status.uptime.as_deref().unwrap_or("unknown");
 
         lines.push(format!(
             "  Status:  {}  (PID {})",
@@ -789,7 +776,11 @@ mod tests {
         let target = current_platform_target();
         assert!(!target.is_empty());
         // Should contain an arch.
-        assert!(target.starts_with("x86_64") || target.starts_with("aarch64") || target.starts_with("unknown"));
+        assert!(
+            target.starts_with("x86_64")
+                || target.starts_with("aarch64")
+                || target.starts_with("unknown")
+        );
     }
 
     #[test]

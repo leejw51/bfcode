@@ -241,8 +241,9 @@ impl ChatClient for OpenAICompatibleClient {
             self.send_request(&request).await?
         };
         let body = response.text().await?;
-        let chat_response: ChatResponse = serde_json::from_str(&body)
-            .with_context(|| format!("Failed to parse response: {}", &body[..body.len().min(500)]))?;
+        let chat_response: ChatResponse = serde_json::from_str(&body).with_context(|| {
+            format!("Failed to parse response: {}", &body[..body.len().min(500)])
+        })?;
         Ok(chat_response)
     }
 
@@ -605,8 +606,12 @@ impl ChatClient for AnthropicClient {
         let _ = temperature; // temperature not in AnthropicRequest for simplicity
         let response = self.send_request(&request).await?;
         let body = response.text().await?;
-        let anthropic_resp: AnthropicResponse = serde_json::from_str(&body)
-            .with_context(|| format!("Failed to parse Anthropic response: {}", &body[..body.len().min(500)]))?;
+        let anthropic_resp: AnthropicResponse = serde_json::from_str(&body).with_context(|| {
+            format!(
+                "Failed to parse Anthropic response: {}",
+                &body[..body.len().min(500)]
+            )
+        })?;
         Ok(Self::convert_response(anthropic_resp))
     }
 
@@ -665,17 +670,13 @@ impl ChatClient for AnthropicClient {
                                             },
                                         });
                                         current_tool_input.clear();
-                                        let _ = tx.send(StreamChunk::ToolCallStart {
-                                            id,
-                                            name,
-                                        });
+                                        let _ = tx.send(StreamChunk::ToolCallStart { id, name });
                                     }
                                 }
                             }
                             "content_block_delta" => {
                                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(data) {
-                                    let delta_type =
-                                        v["delta"]["type"].as_str().unwrap_or("");
+                                    let delta_type = v["delta"]["type"].as_str().unwrap_or("");
                                     match delta_type {
                                         "text_delta" => {
                                             if let Some(text) = v["delta"]["text"].as_str() {
@@ -685,8 +686,7 @@ impl ChatClient for AnthropicClient {
                                             }
                                         }
                                         "input_json_delta" => {
-                                            if let Some(json) =
-                                                v["delta"]["partial_json"].as_str()
+                                            if let Some(json) = v["delta"]["partial_json"].as_str()
                                             {
                                                 current_tool_input.push_str(json);
                                                 let _ = tx.send(StreamChunk::ToolCallDelta {
@@ -727,8 +727,7 @@ impl ChatClient for AnthropicClient {
                             }
                             "message_start" => {
                                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(data) {
-                                    if let Some(u) = v.get("message").and_then(|m| m.get("usage"))
-                                    {
+                                    if let Some(u) = v.get("message").and_then(|m| m.get("usage")) {
                                         if let Some(inp) = u["input_tokens"].as_u64() {
                                             usage = Some(Usage {
                                                 prompt_tokens: inp,
@@ -781,12 +780,12 @@ impl ChatClient for AnthropicClient {
 /// Create the appropriate client based on config
 pub fn create_client(config: &GlobalConfig) -> Result<Box<dyn ChatClient>> {
     let provider = detect_provider(&config.model);
-    let provider_config = get_provider_config(&provider);
+    let provider_config = get_provider_config(&provider)?;
 
     match provider {
-        Provider::Grok | Provider::OpenAI => {
-            Ok(Box::new(OpenAICompatibleClient::from_config(&provider_config)?))
-        }
+        Provider::Grok | Provider::OpenAI => Ok(Box::new(OpenAICompatibleClient::from_config(
+            &provider_config,
+        )?)),
         Provider::Anthropic => Ok(Box::new(AnthropicClient::from_config(&provider_config)?)),
     }
 }
@@ -931,8 +930,12 @@ mod tests {
         ];
         let tools = vec![];
 
-        let req =
-            AnthropicClient::build_anthropic_request(&messages, &tools, "claude-sonnet-4-20250514", false);
+        let req = AnthropicClient::build_anthropic_request(
+            &messages,
+            &tools,
+            "claude-sonnet-4-20250514",
+            false,
+        );
 
         assert_eq!(req.model, "claude-sonnet-4-20250514");
         assert_eq!(req.system.as_deref(), Some("You are helpful."));
@@ -960,8 +963,12 @@ mod tests {
         ];
         let tools = vec![];
 
-        let req =
-            AnthropicClient::build_anthropic_request(&messages, &tools, "claude-sonnet-4-20250514", false);
+        let req = AnthropicClient::build_anthropic_request(
+            &messages,
+            &tools,
+            "claude-sonnet-4-20250514",
+            false,
+        );
 
         // tool_result becomes user message in Anthropic format
         assert_eq!(req.messages.len(), 3);
@@ -1154,7 +1161,12 @@ mod tests {
     #[test]
     fn test_anthropic_request_no_system_message() {
         let messages = vec![Message::user("Hello")];
-        let req = AnthropicClient::build_anthropic_request(&messages, &[], "claude-sonnet-4-20250514", false);
+        let req = AnthropicClient::build_anthropic_request(
+            &messages,
+            &[],
+            "claude-sonnet-4-20250514",
+            false,
+        );
         assert!(req.system.is_none());
         assert_eq!(req.messages.len(), 1);
     }
@@ -1167,7 +1179,12 @@ mod tests {
             Message::system("Second system"),
             Message::user("Hello"),
         ];
-        let req = AnthropicClient::build_anthropic_request(&messages, &[], "claude-sonnet-4-20250514", false);
+        let req = AnthropicClient::build_anthropic_request(
+            &messages,
+            &[],
+            "claude-sonnet-4-20250514",
+            false,
+        );
         // Second system overwrites first
         assert_eq!(req.system.as_deref(), Some("Second system"));
         assert_eq!(req.messages.len(), 1);
@@ -1176,8 +1193,18 @@ mod tests {
     #[test]
     fn test_anthropic_request_stream_flag() {
         let messages = vec![Message::user("Hello")];
-        let req_stream = AnthropicClient::build_anthropic_request(&messages, &[], "claude-sonnet-4-20250514", true);
-        let req_no_stream = AnthropicClient::build_anthropic_request(&messages, &[], "claude-sonnet-4-20250514", false);
+        let req_stream = AnthropicClient::build_anthropic_request(
+            &messages,
+            &[],
+            "claude-sonnet-4-20250514",
+            true,
+        );
+        let req_no_stream = AnthropicClient::build_anthropic_request(
+            &messages,
+            &[],
+            "claude-sonnet-4-20250514",
+            false,
+        );
         assert!(req_stream.stream);
         assert!(!req_no_stream.stream);
     }
@@ -1186,8 +1213,12 @@ mod tests {
     fn test_anthropic_response_multiple_text_blocks() {
         let resp = AnthropicResponse {
             content: vec![
-                AnthropicContentBlock::Text { text: "Hello ".into() },
-                AnthropicContentBlock::Text { text: "World!".into() },
+                AnthropicContentBlock::Text {
+                    text: "Hello ".into(),
+                },
+                AnthropicContentBlock::Text {
+                    text: "World!".into(),
+                },
             ],
             usage: None,
             stop_reason: Some("end_turn".into()),
@@ -1225,7 +1256,10 @@ mod tests {
                     input: serde_json::json!({"path": "b.rs"}),
                 },
             ],
-            usage: Some(AnthropicUsage { input_tokens: 10, output_tokens: 20 }),
+            usage: Some(AnthropicUsage {
+                input_tokens: 10,
+                output_tokens: 20,
+            }),
             stop_reason: Some("tool_use".into()),
         };
         let chat_resp = AnthropicClient::convert_response(resp);
@@ -1239,15 +1273,15 @@ mod tests {
 
     #[test]
     fn test_get_provider_config() {
-        let grok = get_provider_config(&Provider::Grok);
+        let grok = get_provider_config(&Provider::Grok).unwrap();
         assert_eq!(grok.api_key_env, "GROK_API_KEY");
         assert!(grok.api_url.contains("x.ai"));
 
-        let openai = get_provider_config(&Provider::OpenAI);
+        let openai = get_provider_config(&Provider::OpenAI).unwrap();
         assert_eq!(openai.api_key_env, "OPENAI_API_KEY");
         assert!(openai.api_url.contains("openai.com"));
 
-        let anthropic = get_provider_config(&Provider::Anthropic);
+        let anthropic = get_provider_config(&Provider::Anthropic).unwrap();
         assert_eq!(anthropic.api_key_env, "ANTHROPIC_API_KEY");
         assert!(anthropic.api_url.contains("anthropic.com"));
     }
@@ -1261,13 +1295,7 @@ mod tests {
             api_key: "test".into(),
             api_url: "http://localhost".into(),
         };
-        let req = client.build_request(
-            &[Message::user("hi")],
-            &[],
-            "gpt-4o",
-            0.7,
-            true,
-        );
+        let req = client.build_request(&[Message::user("hi")], &[], "gpt-4o", 0.7, true);
         assert_eq!(req.model, "gpt-4o");
         assert!(req.stream);
         assert_eq!(req.temperature, 0.7);
@@ -1289,13 +1317,7 @@ mod tests {
                 parameters: serde_json::json!({}),
             },
         }];
-        let req = client.build_request(
-            &[Message::user("hi")],
-            &tools,
-            "gpt-4o",
-            0.0,
-            false,
-        );
+        let req = client.build_request(&[Message::user("hi")], &tools, "gpt-4o", 0.0, false);
         assert!(req.tools.is_some());
         assert_eq!(req.tools.unwrap().len(), 1);
         assert!(!req.stream);

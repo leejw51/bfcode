@@ -1,3 +1,4 @@
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 // --- Provider Types ---
@@ -78,17 +79,19 @@ pub fn detect_provider(model: &str) -> Provider {
 }
 
 /// Get provider config for a given provider
-pub fn get_provider_config(provider: &Provider) -> ProviderConfig {
+pub fn get_provider_config(provider: &Provider) -> anyhow::Result<ProviderConfig> {
     provider_configs()
         .into_iter()
         .find(|c| c.provider == *provider)
-        .unwrap()
+        .context(format!("No provider config found for {}", provider))
 }
 
 /// Get context limit for a model
 pub fn context_limit_for_model(model: &str) -> u64 {
     let provider = detect_provider(model);
-    get_provider_config(&provider).context_limit
+    get_provider_config(&provider)
+        .map(|c| c.context_limit)
+        .unwrap_or(128_000)
 }
 
 /// Per-token cost in USD (per 1M tokens)
@@ -102,25 +105,73 @@ pub struct ModelCost {
 pub fn model_cost(model: &str) -> ModelCost {
     match model {
         // Grok models
-        m if m.starts_with("grok-4-1-fast") => ModelCost { input_per_million: 3.0, output_per_million: 15.0 },
-        m if m.starts_with("grok-4-1") => ModelCost { input_per_million: 3.0, output_per_million: 15.0 },
-        m if m.starts_with("grok-3") => ModelCost { input_per_million: 3.0, output_per_million: 15.0 },
-        m if m.starts_with("grok") => ModelCost { input_per_million: 3.0, output_per_million: 15.0 },
+        m if m.starts_with("grok-4-1-fast") => ModelCost {
+            input_per_million: 3.0,
+            output_per_million: 15.0,
+        },
+        m if m.starts_with("grok-4-1") => ModelCost {
+            input_per_million: 3.0,
+            output_per_million: 15.0,
+        },
+        m if m.starts_with("grok-3") => ModelCost {
+            input_per_million: 3.0,
+            output_per_million: 15.0,
+        },
+        m if m.starts_with("grok") => ModelCost {
+            input_per_million: 3.0,
+            output_per_million: 15.0,
+        },
         // OpenAI models
-        m if m.starts_with("gpt-4o-mini") => ModelCost { input_per_million: 0.15, output_per_million: 0.60 },
-        m if m.starts_with("gpt-4o") => ModelCost { input_per_million: 2.50, output_per_million: 10.0 },
-        m if m.starts_with("gpt-4") => ModelCost { input_per_million: 30.0, output_per_million: 60.0 },
-        m if m.starts_with("o4-mini") => ModelCost { input_per_million: 1.10, output_per_million: 4.40 },
-        m if m.starts_with("o3-mini") => ModelCost { input_per_million: 1.10, output_per_million: 4.40 },
-        m if m.starts_with("o3") => ModelCost { input_per_million: 10.0, output_per_million: 40.0 },
-        m if m.starts_with("o1-mini") => ModelCost { input_per_million: 3.0, output_per_million: 12.0 },
-        m if m.starts_with("o1") => ModelCost { input_per_million: 15.0, output_per_million: 60.0 },
+        m if m.starts_with("gpt-4o-mini") => ModelCost {
+            input_per_million: 0.15,
+            output_per_million: 0.60,
+        },
+        m if m.starts_with("gpt-4o") => ModelCost {
+            input_per_million: 2.50,
+            output_per_million: 10.0,
+        },
+        m if m.starts_with("gpt-4") => ModelCost {
+            input_per_million: 30.0,
+            output_per_million: 60.0,
+        },
+        m if m.starts_with("o4-mini") => ModelCost {
+            input_per_million: 1.10,
+            output_per_million: 4.40,
+        },
+        m if m.starts_with("o3-mini") => ModelCost {
+            input_per_million: 1.10,
+            output_per_million: 4.40,
+        },
+        m if m.starts_with("o3") => ModelCost {
+            input_per_million: 10.0,
+            output_per_million: 40.0,
+        },
+        m if m.starts_with("o1-mini") => ModelCost {
+            input_per_million: 3.0,
+            output_per_million: 12.0,
+        },
+        m if m.starts_with("o1") => ModelCost {
+            input_per_million: 15.0,
+            output_per_million: 60.0,
+        },
         // Anthropic models
-        m if m.contains("opus") => ModelCost { input_per_million: 15.0, output_per_million: 75.0 },
-        m if m.contains("sonnet") => ModelCost { input_per_million: 3.0, output_per_million: 15.0 },
-        m if m.contains("haiku") => ModelCost { input_per_million: 0.25, output_per_million: 1.25 },
+        m if m.contains("opus") => ModelCost {
+            input_per_million: 15.0,
+            output_per_million: 75.0,
+        },
+        m if m.contains("sonnet") => ModelCost {
+            input_per_million: 3.0,
+            output_per_million: 15.0,
+        },
+        m if m.contains("haiku") => ModelCost {
+            input_per_million: 0.25,
+            output_per_million: 1.25,
+        },
         // Default fallback
-        _ => ModelCost { input_per_million: 3.0, output_per_million: 15.0 },
+        _ => ModelCost {
+            input_per_million: 3.0,
+            output_per_million: 15.0,
+        },
     }
 }
 
@@ -209,7 +260,7 @@ impl Message {
     /// Convert to OpenAI JSON format (handles image content arrays)
     pub fn to_openai_json(&self) -> serde_json::Value {
         if self.has_images() && self.role == "user" {
-            let images = self.images.as_ref().unwrap();
+            let images = self.images.as_deref().unwrap_or_default();
             let mut content_parts: Vec<serde_json::Value> = Vec::new();
             if let Some(text) = &self.content {
                 content_parts.push(serde_json::json!({"type": "text", "text": text}));
@@ -238,7 +289,7 @@ impl Message {
     /// Convert to Anthropic JSON format (handles image content blocks)
     pub fn to_anthropic_content(&self) -> serde_json::Value {
         if self.has_images() && self.role == "user" {
-            let images = self.images.as_ref().unwrap();
+            let images = self.images.as_deref().unwrap_or_default();
             let mut content_parts: Vec<serde_json::Value> = Vec::new();
             if let Some(text) = &self.content {
                 content_parts.push(serde_json::json!({"type": "text", "text": text}));
@@ -288,7 +339,11 @@ impl Message {
             content: Some(content.into()),
             tool_calls: None,
             tool_call_id: None,
-            images: if images.is_empty() { None } else { Some(images) },
+            images: if images.is_empty() {
+                None
+            } else {
+                Some(images)
+            },
         }
     }
 
@@ -795,8 +850,14 @@ mod tests {
 
     #[test]
     fn test_detect_provider_anthropic() {
-        assert_eq!(detect_provider("claude-sonnet-4-20250514"), Provider::Anthropic);
-        assert_eq!(detect_provider("claude-3-5-haiku-latest"), Provider::Anthropic);
+        assert_eq!(
+            detect_provider("claude-sonnet-4-20250514"),
+            Provider::Anthropic
+        );
+        assert_eq!(
+            detect_provider("claude-3-5-haiku-latest"),
+            Provider::Anthropic
+        );
     }
 
     #[test]
@@ -1021,7 +1082,8 @@ mod tests {
 
     #[test]
     fn test_edit_args() {
-        let json = r#"{"path": "f.rs", "old_string": "foo", "new_string": "bar", "replace_all": true}"#;
+        let json =
+            r#"{"path": "f.rs", "old_string": "foo", "new_string": "bar", "replace_all": true}"#;
         let args: EditArgs = serde_json::from_str(json).unwrap();
         assert_eq!(args.replace_all, Some(true));
     }
@@ -1086,7 +1148,8 @@ mod tests {
 
     #[test]
     fn test_anthropic_content_block_tool_use() {
-        let json = r#"{"type": "tool_use", "id": "tu_1", "name": "read", "input": {"path": "foo.rs"}}"#;
+        let json =
+            r#"{"type": "tool_use", "id": "tu_1", "name": "read", "input": {"path": "foo.rs"}}"#;
         let block: AnthropicContentBlock = serde_json::from_str(json).unwrap();
         match block {
             AnthropicContentBlock::ToolUse { id, name, input } => {
@@ -1276,7 +1339,12 @@ mod tests {
         assert_eq!(content.len(), 2);
         assert_eq!(content[0]["type"], "text");
         assert_eq!(content[1]["type"], "image_url");
-        assert!(content[1]["image_url"]["url"].as_str().unwrap().starts_with("data:image/png;base64,"));
+        assert!(
+            content[1]["image_url"]["url"]
+                .as_str()
+                .unwrap()
+                .starts_with("data:image/png;base64,")
+        );
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use colored::Colorize;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -156,8 +156,8 @@ pub fn load_full_config() -> Result<FullConfig> {
         eprintln!("{} {}", "config warning:".yellow().bold(), err);
     }
 
-    let config: FullConfig = serde_json::from_value(merged)
-        .context("deserializing merged config into FullConfig")?;
+    let config: FullConfig =
+        serde_json::from_value(merged).context("deserializing merged config into FullConfig")?;
 
     Ok(config)
 }
@@ -168,9 +168,8 @@ pub fn load_config_file(path: &Path) -> Result<serde_json::Value> {
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
 
     match detect_format(path) {
-        ConfigFormat::Json => {
-            serde_json::from_str(&content).with_context(|| format!("parsing JSON {}", path.display()))
-        }
+        ConfigFormat::Json => serde_json::from_str(&content)
+            .with_context(|| format!("parsing JSON {}", path.display())),
         ConfigFormat::Yaml => parse_simple_yaml(&content),
     }
 }
@@ -193,10 +192,7 @@ pub fn parse_simple_yaml(content: &str) -> Result<serde_json::Value> {
 
 /// Deep-merge two JSON values.  Objects are merged recursively, arrays are
 /// concatenated, and scalars are overwritten by `overlay`.
-pub fn merge_configs(
-    base: serde_json::Value,
-    overlay: serde_json::Value,
-) -> serde_json::Value {
+pub fn merge_configs(base: serde_json::Value, overlay: serde_json::Value) -> serde_json::Value {
     use serde_json::Value;
 
     match (base, overlay) {
@@ -319,10 +315,7 @@ pub fn validate_config(config: &serde_json::Value) -> Vec<ValidationError> {
                     if parts[0].parse::<u16>().is_err() {
                         errors.push(ValidationError {
                             field: "gateway.listen".into(),
-                            message: format!(
-                                "port part must be a valid u16, got \"{}\"",
-                                parts[0]
-                            ),
+                            message: format!("port part must be a valid u16, got \"{}\"", parts[0]),
                         });
                     }
                 }
@@ -435,14 +428,30 @@ pub fn find_config_files() -> Vec<ConfigSource> {
     // Global configs.
     if let Some(home) = dirs::home_dir() {
         let global_dir = home.join(".bfcode");
-        push_if_exists(&mut sources, global_dir.join("config.json"), ConfigFormat::Json);
-        push_if_exists(&mut sources, global_dir.join("config.yaml"), ConfigFormat::Yaml);
+        push_if_exists(
+            &mut sources,
+            global_dir.join("config.json"),
+            ConfigFormat::Json,
+        );
+        push_if_exists(
+            &mut sources,
+            global_dir.join("config.yaml"),
+            ConfigFormat::Yaml,
+        );
     }
 
     // Project-local configs.
     let local_dir = PathBuf::from(".bfcode");
-    push_if_exists(&mut sources, local_dir.join("config.json"), ConfigFormat::Json);
-    push_if_exists(&mut sources, local_dir.join("config.yaml"), ConfigFormat::Yaml);
+    push_if_exists(
+        &mut sources,
+        local_dir.join("config.json"),
+        ConfigFormat::Json,
+    );
+    push_if_exists(
+        &mut sources,
+        local_dir.join("config.yaml"),
+        ConfigFormat::Yaml,
+    );
 
     sources
 }
@@ -461,12 +470,7 @@ pub fn format_config_info(config: &FullConfig, sources: &[ConfigSource]) -> Stri
                 ConfigFormat::Json => "JSON",
                 ConfigFormat::Yaml => "YAML",
             };
-            out.push_str(&format!(
-                "  {}. {} ({})\n",
-                i + 1,
-                src.path.display(),
-                fmt
-            ));
+            out.push_str(&format!("  {}. {} ({})\n", i + 1, src.path.display(), fmt));
         }
     }
 
@@ -489,38 +493,35 @@ pub fn init_config(path: &Path, format: ConfigFormat) -> Result<()> {
     }
 
     let content = match format {
-        ConfigFormat::Json => {
-            concat!(
-                "{\n",
-                "  // bfcode configuration file\n",
-                "  // See documentation for all available options.\n",
-                "\n",
-                "  // Model to use for completions.\n",
-                "  \"model\": \"claude-opus-4-6\",\n",
-                "\n",
-                "  // Sampling temperature (0.0 - 2.0).\n",
-                "  \"temperature\": 1.0,\n",
-                "\n",
-                "  // Provider backend.\n",
-                "  \"provider\": \"anthropic\",\n",
-                "\n",
-                "  // Include other config files (merged before this one).\n",
-                "  // \"include\": [\"shared.yaml\"],\n",
-                "\n",
-                "  // Custom environment variables.\n",
-                "  \"env\": {},\n",
-                "\n",
-                "  // Lifecycle hooks (list of hook objects).\n",
-                "  \"hooks\": [],\n",
-                "\n",
-                "  // Schema version (do not change manually).\n",
-                "  \"config_version\": 2\n",
-                "}\n",
-            )
-            .to_string()
-        }
-        ConfigFormat::Yaml => {
-            r##"# bfcode configuration file
+        ConfigFormat::Json => concat!(
+            "{\n",
+            "  // bfcode configuration file\n",
+            "  // See documentation for all available options.\n",
+            "\n",
+            "  // Model to use for completions.\n",
+            "  \"model\": \"claude-opus-4-6\",\n",
+            "\n",
+            "  // Sampling temperature (0.0 - 2.0).\n",
+            "  \"temperature\": 1.0,\n",
+            "\n",
+            "  // Provider backend.\n",
+            "  \"provider\": \"anthropic\",\n",
+            "\n",
+            "  // Include other config files (merged before this one).\n",
+            "  // \"include\": [\"shared.yaml\"],\n",
+            "\n",
+            "  // Custom environment variables.\n",
+            "  \"env\": {},\n",
+            "\n",
+            "  // Lifecycle hooks (list of hook objects).\n",
+            "  \"hooks\": [],\n",
+            "\n",
+            "  // Schema version (do not change manually).\n",
+            "  \"config_version\": 2\n",
+            "}\n",
+        )
+        .to_string(),
+        ConfigFormat::Yaml => r##"# bfcode configuration file
 # See documentation for all available options.
 
 # Model to use for completions.
@@ -549,18 +550,13 @@ config_version: 2
 #   respawn: true
 #   max_respawns: 5
 "##
-            .to_string()
-        }
+        .to_string(),
     };
 
     std::fs::write(path, &content)
         .with_context(|| format!("writing config to {}", path.display()))?;
 
-    println!(
-        "{} created {}",
-        "ok:".green().bold(),
-        path.display()
-    );
+    println!("{} created {}", "ok:".green().bold(), path.display());
 
     Ok(())
 }
@@ -1208,25 +1204,38 @@ temperature: 0.5
             }
         });
         let errs = validate_config(&config);
-        assert!(errs.is_empty(), "expected no errors, got: {:?}", errs.iter().map(|e| e.to_string()).collect::<Vec<_>>());
+        assert!(
+            errs.is_empty(),
+            "expected no errors, got: {:?}",
+            errs.iter().map(|e| e.to_string()).collect::<Vec<_>>()
+        );
     }
 
     #[test]
     fn test_validate_invalid_temperature() {
         let config = serde_json::json!({ "temperature": 2.5 });
         let errs = validate_config(&config);
-        assert!(errs.iter().any(|e| e.field == "temperature"), "expected temperature error");
+        assert!(
+            errs.iter().any(|e| e.field == "temperature"),
+            "expected temperature error"
+        );
 
         let config_neg = serde_json::json!({ "temperature": -0.1 });
         let errs_neg = validate_config(&config_neg);
-        assert!(errs_neg.iter().any(|e| e.field == "temperature"), "expected temperature error for negative");
+        assert!(
+            errs_neg.iter().any(|e| e.field == "temperature"),
+            "expected temperature error for negative"
+        );
     }
 
     #[test]
     fn test_validate_empty_model() {
         let config = serde_json::json!({ "model": "" });
         let errs = validate_config(&config);
-        assert!(errs.iter().any(|e| e.field == "model" && e.message.contains("non-empty")));
+        assert!(
+            errs.iter()
+                .any(|e| e.field == "model" && e.message.contains("non-empty"))
+        );
     }
 
     #[test]

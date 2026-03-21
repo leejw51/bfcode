@@ -191,7 +191,12 @@ pub fn format_doctor_results(results: &[CheckResult]) -> String {
             CheckStatus::Warn => format!("{}", "\u{26a0} WARN".yellow()),
             CheckStatus::Fail => format!("{}", "\u{2717} FAIL".red()),
         };
-        out.push_str(&format!("  {} {}: {}\n", status_str, r.name.bold(), r.message));
+        out.push_str(&format!(
+            "  {} {}: {}\n",
+            status_str,
+            r.name.bold(),
+            r.message
+        ));
         if let Some(ref details) = r.details {
             for line in details.lines() {
                 out.push_str(&format!("         {}\n", line.dimmed()));
@@ -199,9 +204,18 @@ pub fn format_doctor_results(results: &[CheckResult]) -> String {
         }
     }
 
-    let passed = results.iter().filter(|r| r.status == CheckStatus::Pass).count();
-    let warned = results.iter().filter(|r| r.status == CheckStatus::Warn).count();
-    let failed = results.iter().filter(|r| r.status == CheckStatus::Fail).count();
+    let passed = results
+        .iter()
+        .filter(|r| r.status == CheckStatus::Pass)
+        .count();
+    let warned = results
+        .iter()
+        .filter(|r| r.status == CheckStatus::Warn)
+        .count();
+    let failed = results
+        .iter()
+        .filter(|r| r.status == CheckStatus::Fail)
+        .count();
 
     out.push_str(&format!(
         "\n{}: {} passed, {} warnings, {} failed\n",
@@ -504,7 +518,12 @@ fn check_chrome() -> CheckResult {
 
     // Fall back to PATH lookup.
     for name in &["google-chrome", "chromium", "chromium-browser"] {
-        if Command::new("which").arg(name).output().map(|o| o.status.success()).unwrap_or(false) {
+        if Command::new("which")
+            .arg(name)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+        {
             return CheckResult {
                 name: "chrome".into(),
                 status: CheckStatus::Pass,
@@ -518,7 +537,9 @@ fn check_chrome() -> CheckResult {
         name: "chrome".into(),
         status: CheckStatus::Warn,
         message: "Chrome/Chromium not found".into(),
-        details: Some("Browser tools (playwright) will not work without a Chromium-based browser".into()),
+        details: Some(
+            "Browser tools (playwright) will not work without a Chromium-based browser".into(),
+        ),
     }
 }
 
@@ -658,12 +679,7 @@ fn check_memories() -> CheckResult {
     let count = std::fs::read_dir(&memory_dir)
         .map(|rd| {
             rd.flatten()
-                .filter(|e| {
-                    e.path()
-                        .extension()
-                        .map(|ext| ext == "md")
-                        .unwrap_or(false)
-                })
+                .filter(|e| e.path().extension().map(|ext| ext == "md").unwrap_or(false))
                 .count()
         })
         .unwrap_or(0);
@@ -752,7 +768,12 @@ fn detect_api_keys() -> Vec<(&'static str, bool)> {
         "TAVILY_API_KEY",
     ]
     .iter()
-    .map(|&name| (name, std::env::var(name).map(|v| !v.is_empty()).unwrap_or(false)))
+    .map(|&name| {
+        (
+            name,
+            std::env::var(name).map(|v| !v.is_empty()).unwrap_or(false),
+        )
+    })
     .collect()
 }
 
@@ -1115,9 +1136,7 @@ mod tests {
     fn test_check_git_runs_and_returns_result() {
         let result = check_git();
         assert_eq!(result.name, "git");
-        assert!(
-            result.status == CheckStatus::Pass || result.status == CheckStatus::Fail
-        );
+        assert!(result.status == CheckStatus::Pass || result.status == CheckStatus::Fail);
         assert!(!result.message.is_empty());
     }
 
@@ -1125,9 +1144,7 @@ mod tests {
     fn test_check_tools_runs() {
         let result = check_tools();
         assert_eq!(result.name, "tools");
-        assert!(
-            result.status == CheckStatus::Pass || result.status == CheckStatus::Warn
-        );
+        assert!(result.status == CheckStatus::Pass || result.status == CheckStatus::Warn);
         assert!(!result.message.is_empty());
     }
 }

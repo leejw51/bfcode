@@ -12,7 +12,8 @@ const DEFAULT_READ_LIMIT: u64 = 2000;
 const MAX_CHARS_PER_LINE: usize = 2000;
 
 pub fn get_tool_definitions() -> Vec<ToolDefinition> {
-    let has_search_key = std::env::var("BRAVE_API_KEY").is_ok() || std::env::var("TAVILY_API_KEY").is_ok();
+    let has_search_key =
+        std::env::var("BRAVE_API_KEY").is_ok() || std::env::var("TAVILY_API_KEY").is_ok();
     let has_openai_key = std::env::var("OPENAI_API_KEY").is_ok();
 
     let mut tools = vec![
@@ -451,7 +452,21 @@ pub async fn execute_tool(
     }
 
     // Check permissions for dangerous tools
-    let needs_permission = matches!(name, "bash" | "write" | "edit" | "apply_patch" | "memory_save" | "memory_delete" | "browser_navigate" | "browser_click" | "browser_type" | "browser_evaluate" | "image_generate" | "tts");
+    let needs_permission = matches!(
+        name,
+        "bash"
+            | "write"
+            | "edit"
+            | "apply_patch"
+            | "memory_save"
+            | "memory_delete"
+            | "browser_navigate"
+            | "browser_click"
+            | "browser_type"
+            | "browser_evaluate"
+            | "image_generate"
+            | "tts"
+    );
     if needs_permission {
         let summary = tool_permission_summary(name, arguments);
         match permissions.ask_permission(name, &summary) {
@@ -965,7 +980,11 @@ async fn exec_memory_save(arguments: &str) -> Result<String> {
         crate::persistence::save_memory(&memory)?
     };
 
-    Ok(format!("Memory '{}' saved to {}", args.name, path.display()))
+    Ok(format!(
+        "Memory '{}' saved to {}",
+        args.name,
+        path.display()
+    ))
 }
 
 async fn exec_memory_delete(arguments: &str) -> Result<String> {
@@ -1000,11 +1019,9 @@ async fn exec_memory_list() -> Result<String> {
 /// Check if a tool is trying to modify a protected file. Returns error message if blocked.
 fn check_protected_file(tool_name: &str, arguments: &str) -> Option<String> {
     let path = match tool_name {
-        "write" | "edit" => {
-            serde_json::from_str::<serde_json::Value>(arguments)
-                .ok()
-                .and_then(|v| v.get("path")?.as_str().map(|s| s.to_string()))
-        }
+        "write" | "edit" => serde_json::from_str::<serde_json::Value>(arguments)
+            .ok()
+            .and_then(|v| v.get("path")?.as_str().map(|s| s.to_string())),
         "apply_patch" => {
             // Check all files in the patch
             let v = serde_json::from_str::<serde_json::Value>(arguments).ok()?;
@@ -1075,15 +1092,24 @@ async fn exec_webfetch(arguments: &str) -> Result<String> {
         .user_agent("Mozilla/5.0 (compatible; bfcode/0.6.0; +https://github.com/user/bfcode)")
         .build()?;
 
-    let response = client.get(&args.url)
-        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+    let response = client
+        .get(&args.url)
+        .header(
+            "Accept",
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        )
         .header("Accept-Language", "en-US,en;q=0.5")
-        .send().await
+        .send()
+        .await
         .with_context(|| format!("Failed to fetch {}", args.url))?;
 
     let status = response.status();
     if !status.is_success() {
-        return Ok(format!("HTTP {} {}", status.as_u16(), status.canonical_reason().unwrap_or("")));
+        return Ok(format!(
+            "HTTP {} {}",
+            status.as_u16(),
+            status.canonical_reason().unwrap_or("")
+        ));
     }
 
     let content_type = response
@@ -1199,9 +1225,7 @@ fn save_file_snapshot(path: &str, session_id: &str) {
             let snapshot = crate::types::FileSnapshot {
                 path: path.to_string(),
                 original_content: original,
-                timestamp: chrono::Local::now()
-                    .format("%Y%m%d_%H%M%S_%3f")
-                    .to_string(),
+                timestamp: chrono::Local::now().format("%Y%m%d_%H%M%S_%3f").to_string(),
                 message_index: 0,
             };
             let _ = crate::persistence::save_snapshot(session_id, &snapshot);
@@ -1226,7 +1250,9 @@ async fn exec_apply_patch(arguments: &str, session_id: &str) -> Result<String> {
         save_file_snapshot(&fp.target_path, session_id);
 
         let content = if std::path::Path::new(&fp.target_path).exists() {
-            tokio::fs::read_to_string(&fp.target_path).await.unwrap_or_default()
+            tokio::fs::read_to_string(&fp.target_path)
+                .await
+                .unwrap_or_default()
         } else {
             String::new()
         };
@@ -1240,11 +1266,16 @@ async fn exec_apply_patch(arguments: &str, session_id: &str) -> Result<String> {
             }
         }
 
-        tokio::fs::write(&fp.target_path, &patched).await
+        tokio::fs::write(&fp.target_path, &patched)
+            .await
             .with_context(|| format!("writing {}", fp.target_path))?;
 
         let status = if content.is_empty() { "A" } else { "M" };
-        results.push(format!("{status} {} ({} hunks applied)", fp.target_path, fp.hunks.len()));
+        results.push(format!(
+            "{status} {} ({} hunks applied)",
+            fp.target_path,
+            fp.hunks.len()
+        ));
     }
 
     Ok(results.join("\n"))
@@ -1299,7 +1330,8 @@ fn parse_unified_diff(patch: &str) -> Result<Vec<FilePatch>> {
                 if lines[i].starts_with("@@ ") {
                     // Parse @@ -old_start,old_count +new_start,new_count @@
                     let hunk_header = lines[i];
-                    let (old_start, old_count, new_start, new_count) = parse_hunk_header(hunk_header)?;
+                    let (old_start, old_count, new_start, new_count) =
+                        parse_hunk_header(hunk_header)?;
                     i += 1;
 
                     let mut hunk_lines = Vec::new();
@@ -1386,7 +1418,11 @@ fn apply_hunks(content: &str, hunks: &[Hunk]) -> Result<String> {
     sorted_hunks.sort_by(|a, b| b.old_start.cmp(&a.old_start));
 
     for hunk in sorted_hunks {
-        let start_idx = if hunk.old_start == 0 { 0 } else { hunk.old_start - 1 };
+        let start_idx = if hunk.old_start == 0 {
+            0
+        } else {
+            hunk.old_start - 1
+        };
 
         let mut remove_count = 0;
         let mut add_lines = Vec::new();
@@ -1427,7 +1463,11 @@ fn apply_hunks(content: &str, hunks: &[Hunk]) -> Result<String> {
         }
 
         // Count context + remove lines to know how many old lines to replace
-        let old_line_count = hunk.lines.iter().filter(|l| !matches!(l, DiffLine::Add(_))).count();
+        let old_line_count = hunk
+            .lines
+            .iter()
+            .filter(|l| !matches!(l, DiffLine::Add(_)))
+            .count();
         let end_idx = (start_idx + old_line_count).min(lines.len());
 
         // Replace the range
@@ -1472,7 +1512,13 @@ async fn exec_websearch(arguments: &str) -> Result<String> {
                 let title = result["title"].as_str().unwrap_or("Untitled");
                 let url = result["url"].as_str().unwrap_or("");
                 let desc = result["description"].as_str().unwrap_or("");
-                output.push_str(&format!("{}. {}\n   {}\n   {}\n\n", i + 1, title, url, desc));
+                output.push_str(&format!(
+                    "{}. {}\n   {}\n   {}\n\n",
+                    i + 1,
+                    title,
+                    url,
+                    desc
+                ));
             }
             if results.is_empty() {
                 output.push_str("No results found.\n");
@@ -1517,7 +1563,13 @@ async fn exec_websearch(arguments: &str) -> Result<String> {
                 let url = r["url"].as_str().unwrap_or("");
                 let content = r["content"].as_str().unwrap_or("");
                 let snippet: String = content.chars().take(200).collect();
-                output.push_str(&format!("{}. {}\n   {}\n   {}\n\n", i + 1, title, url, snippet));
+                output.push_str(&format!(
+                    "{}. {}\n   {}\n   {}\n\n",
+                    i + 1,
+                    title,
+                    url,
+                    snippet
+                ));
             }
         }
         return Ok(output);
@@ -1549,7 +1601,10 @@ async fn exec_memory_search(arguments: &str) -> Result<String> {
     let results = index.search(&args.query, top_k);
 
     if results.is_empty() {
-        return Ok(format!("No relevant memories found for: \"{}\"", args.query));
+        return Ok(format!(
+            "No relevant memories found for: \"{}\"",
+            args.query
+        ));
     }
 
     let mut output = format!("Memory search results for: \"{}\"\n\n", args.query);
@@ -1589,7 +1644,12 @@ async fn exec_pdf_read(arguments: &str) -> Result<String> {
             output.push_str(pages.get(i).unwrap_or(&""));
             output.push('\n');
         }
-        output.push_str(&format!("\nShowing pages {}-{} of {}", start + 1, end.min(total_pages - 1) + 1, total_pages));
+        output.push_str(&format!(
+            "\nShowing pages {}-{} of {}",
+            start + 1,
+            end.min(total_pages - 1) + 1,
+            total_pages
+        ));
         Ok(output)
     } else {
         let pages: Vec<&str> = text.split('\u{0c}').collect();
@@ -1650,7 +1710,9 @@ async fn exec_image_generate(arguments: &str) -> Result<String> {
     let result: serde_json::Value = resp.json().await?;
 
     if !status.is_success() {
-        let err_msg = result["error"]["message"].as_str().unwrap_or("Unknown error");
+        let err_msg = result["error"]["message"]
+            .as_str()
+            .unwrap_or("Unknown error");
         bail!("DALL-E API error: {err_msg}");
     }
 
@@ -1658,10 +1720,7 @@ async fn exec_image_generate(arguments: &str) -> Result<String> {
         .as_str()
         .context("No image data in response")?;
 
-    let image_bytes = base64::Engine::decode(
-        &base64::engine::general_purpose::STANDARD,
-        b64_data,
-    )?;
+    let image_bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b64_data)?;
 
     let output_path = match args.output_path {
         Some(p) => p,
@@ -1673,7 +1732,8 @@ async fn exec_image_generate(arguments: &str) -> Result<String> {
         }
     };
 
-    tokio::fs::write(&output_path, &image_bytes).await
+    tokio::fs::write(&output_path, &image_bytes)
+        .await
         .with_context(|| format!("writing image to {output_path}"))?;
 
     let revised_prompt = result["data"][0]["revised_prompt"]
@@ -1692,7 +1752,13 @@ async fn exec_tts(arguments: &str) -> Result<String> {
 
     // If output_path is provided or OPENAI_API_KEY is set, try API first
     if let Ok(api_key) = std::env::var("OPENAI_API_KEY") {
-        if args.output_path.is_some() || args.voice.as_deref().map(|v| matches!(v, "alloy" | "echo" | "fable" | "onyx" | "nova" | "shimmer")).unwrap_or(false) {
+        if args.output_path.is_some()
+            || args
+                .voice
+                .as_deref()
+                .map(|v| matches!(v, "alloy" | "echo" | "fable" | "onyx" | "nova" | "shimmer"))
+                .unwrap_or(false)
+        {
             let voice = args.voice.as_deref().unwrap_or("alloy");
             let client = reqwest::Client::builder()
                 .timeout(Duration::from_secs(60))
@@ -1728,7 +1794,10 @@ async fn exec_tts(arguments: &str) -> Result<String> {
             }
             tokio::fs::write(&output_path, &audio_bytes).await?;
 
-            return Ok(format!("Audio saved to: {output_path} ({} bytes, voice: {voice})", audio_bytes.len()));
+            return Ok(format!(
+                "Audio saved to: {output_path} ({} bytes, voice: {voice})",
+                audio_bytes.len()
+            ));
         }
     }
 
@@ -1924,7 +1993,11 @@ mod tests {
     fn test_tool_definitions_all_have_descriptions() {
         let defs = get_tool_definitions();
         for def in &defs {
-            assert!(!def.function.description.is_empty(), "Tool {} has empty description", def.function.name);
+            assert!(
+                !def.function.description.is_empty(),
+                "Tool {} has empty description",
+                def.function.name
+            );
             assert_eq!(def.tool_type, "function");
         }
     }
@@ -1934,8 +2007,16 @@ mod tests {
         let defs = get_tool_definitions();
         for def in &defs {
             let params = &def.function.parameters;
-            assert_eq!(params["type"], "object", "Tool {} params not an object", def.function.name);
-            assert!(params["properties"].is_object(), "Tool {} has no properties", def.function.name);
+            assert_eq!(
+                params["type"], "object",
+                "Tool {} params not an object",
+                def.function.name
+            );
+            assert!(
+                params["properties"].is_object(),
+                "Tool {} has no properties",
+                def.function.name
+            );
         }
     }
 
@@ -2000,7 +2081,10 @@ mod tests {
         let content: String = (1..=20).map(|i| format!("line{i}\n")).collect();
         std::fs::write(&file, &content).unwrap();
 
-        let args = format!(r#"{{"path": "{}", "offset": 5, "limit": 3}}"#, file.display());
+        let args = format!(
+            r#"{{"path": "{}", "offset": 5, "limit": 3}}"#,
+            file.display()
+        );
         let result = exec_read(&args).await.unwrap();
         assert!(result.contains("line5"));
         assert!(result.contains("line6"));
@@ -2024,7 +2108,10 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         let file = dir.join("output.txt");
 
-        let args = format!(r#"{{"path": "{}", "content": "hello\nworld"}}"#, file.display());
+        let args = format!(
+            r#"{{"path": "{}", "content": "hello\nworld"}}"#,
+            file.display()
+        );
         let result = exec_write(&args, "test").await.unwrap();
         assert!(result.contains("Wrote"));
         assert!(result.contains("2 lines"));
@@ -2122,7 +2209,12 @@ mod tests {
         );
         let result = exec_edit(&args, "test").await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must be different"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("must be different")
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2619,7 +2711,10 @@ mod tests {
 
     #[test]
     fn test_strip_html_tags_nested() {
-        assert_eq!(strip_html_tags("<div><p>hello <b>world</b></p></div>"), "hello world");
+        assert_eq!(
+            strip_html_tags("<div><p>hello <b>world</b></p></div>"),
+            "hello world"
+        );
     }
 
     #[test]

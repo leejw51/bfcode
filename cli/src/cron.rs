@@ -39,7 +39,9 @@ pub fn parse_schedule(s: &str) -> Result<u64> {
     }
 
     if s.len() < 2 {
-        anyhow::bail!("Invalid schedule string: {s:?}. Use e.g. \"30s\", \"5m\", \"1h\", \"daily\", \"hourly\".");
+        anyhow::bail!(
+            "Invalid schedule string: {s:?}. Use e.g. \"30s\", \"5m\", \"1h\", \"daily\", \"hourly\"."
+        );
     }
 
     let (digits, suffix) = s.split_at(s.len() - 1);
@@ -112,20 +114,15 @@ impl CronManager {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("Failed to create directory {}", parent.display()))?;
         }
-        let json = serde_json::to_string_pretty(&self.jobs)
-            .context("Failed to serialize cron jobs")?;
+        let json =
+            serde_json::to_string_pretty(&self.jobs).context("Failed to serialize cron jobs")?;
         std::fs::write(&path, json)
             .with_context(|| format!("Failed to write {}", path.display()))?;
         Ok(())
     }
 
     /// Add a new job, returns the job ID.
-    pub fn add_job(
-        &mut self,
-        schedule: &str,
-        command: &str,
-        description: &str,
-    ) -> Result<String> {
+    pub fn add_job(&mut self, schedule: &str, command: &str, description: &str) -> Result<String> {
         // Validate the schedule before adding
         parse_schedule(schedule)?;
 
@@ -248,10 +245,8 @@ impl CronManager {
                     let is_due = match &jobs[i].last_run {
                         Some(last) => {
                             if let Ok(last_dt) = chrono::DateTime::parse_from_rfc3339(last) {
-                                let elapsed = now
-                                    .signed_duration_since(last_dt)
-                                    .num_seconds()
-                                    .max(0) as u64;
+                                let elapsed =
+                                    now.signed_duration_since(last_dt).num_seconds().max(0) as u64;
                                 elapsed >= interval_secs
                             } else {
                                 // Unparseable last_run — treat as due
@@ -297,8 +292,7 @@ impl CronManager {
                                     .code()
                                     .map(|c| c.to_string())
                                     .unwrap_or_else(|| "unknown".into());
-                                let stderr =
-                                    String::from_utf8_lossy(&output.stderr);
+                                let stderr = String::from_utf8_lossy(&output.stderr);
                                 eprintln!(
                                     "{} job {} {} (exit {}): {}",
                                     "[cron]".yellow(),

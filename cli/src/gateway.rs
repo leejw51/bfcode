@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use colored::Colorize;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -141,7 +141,8 @@ struct HttpRequest {
 }
 
 fn parse_http_request(raw: &[u8]) -> Result<HttpRequest> {
-    let header_end = find_header_end(raw).context("Incomplete HTTP request: no header terminator")?;
+    let header_end =
+        find_header_end(raw).context("Incomplete HTTP request: no header terminator")?;
     let header_bytes = &raw[..header_end];
     let header_str =
         std::str::from_utf8(header_bytes).context("HTTP headers are not valid UTF-8")?;
@@ -250,11 +251,7 @@ pub async fn start_server(config: &GatewayConfig) -> Result<()> {
     if config.tailscale {
         let st = state.lock().await;
         if let Some(ref ip) = st.tailscale_ip {
-            eprintln!(
-                "{} Tailscale IP: {}",
-                "bfcode".cyan().bold(),
-                ip.green()
-            );
+            eprintln!("{} Tailscale IP: {}", "bfcode".cyan().bold(), ip.green());
         } else {
             eprintln!(
                 "{} Tailscale enabled but no IP detected",
@@ -416,10 +413,7 @@ async fn handle_list_sessions(state: &Arc<Mutex<ServerState>>) -> Vec<u8> {
     json_response(200, "OK", &val)
 }
 
-async fn handle_create_session(
-    req: &HttpRequest,
-    state: &Arc<Mutex<ServerState>>,
-) -> Vec<u8> {
+async fn handle_create_session(req: &HttpRequest, state: &Arc<Mutex<ServerState>>) -> Vec<u8> {
     #[derive(Deserialize)]
     struct CreateSessionReq {
         #[serde(default = "default_user")]
@@ -462,10 +456,7 @@ async fn handle_create_session(
     json_response(201, "Created", &val)
 }
 
-async fn handle_chat(
-    req: &HttpRequest,
-    state: &Arc<Mutex<ServerState>>,
-) -> Vec<u8> {
+async fn handle_chat(req: &HttpRequest, state: &Arc<Mutex<ServerState>>) -> Vec<u8> {
     #[derive(Deserialize)]
     struct ChatReq {
         message: String,
@@ -476,11 +467,7 @@ async fn handle_chat(
     let parsed: ChatReq = match serde_json::from_slice(&req.body) {
         Ok(v) => v,
         Err(e) => {
-            return error_response(
-                400,
-                "Bad Request",
-                &format!("Invalid JSON body: {e}"),
-            );
+            return error_response(400, "Bad Request", &format!("Invalid JSON body: {e}"));
         }
     };
 
@@ -612,16 +599,11 @@ pub async fn remote_chat(
 }
 
 /// Get gateway status from a remote instance.
-pub async fn remote_status(
-    gateway_url: &str,
-    api_key: Option<&str>,
-) -> Result<GatewayStatus> {
+pub async fn remote_status(gateway_url: &str, api_key: Option<&str>) -> Result<GatewayStatus> {
     let url = format!("{}/v1/status", gateway_url.trim_end_matches('/'));
     let client = reqwest::Client::new();
 
-    let mut req = client
-        .get(&url)
-        .timeout(std::time::Duration::from_secs(10));
+    let mut req = client.get(&url).timeout(std::time::Duration::from_secs(10));
 
     if let Some(key) = api_key {
         req = req.bearer_auth(key);
@@ -659,11 +641,7 @@ pub fn tailscale_ip() -> Option<String> {
     }
 
     let ip = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if ip.is_empty() {
-        None
-    } else {
-        Some(ip)
-    }
+    if ip.is_empty() { None } else { Some(ip) }
 }
 
 // ---------------------------------------------------------------------------
@@ -805,7 +783,10 @@ mod tests {
         assert_eq!(req.method, "POST");
         assert_eq!(req.path, "/v1/chat");
         assert_eq!(req.body, b"{\"message\":\"hello\"}");
-        assert_eq!(req.headers.get("host").map(|s| s.as_str()), Some("localhost"));
+        assert_eq!(
+            req.headers.get("host").map(|s| s.as_str()),
+            Some("localhost")
+        );
     }
 
     #[test]

@@ -31,7 +31,11 @@ const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧
 
 /// bfcode — back to the future code, an AI coding assistant
 #[derive(Parser)]
-#[command(name = "bfcode", version = "0.6.0", about = "AI coding assistant (Grok/OpenAI/Anthropic)")]
+#[command(
+    name = "bfcode",
+    version = "0.6.0",
+    about = "AI coding assistant (Grok/OpenAI/Anthropic)"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -312,9 +316,7 @@ async fn main() -> Result<()> {
         None | Some(Commands::Chat { .. }) => {
             // Extract initial message if provided via `bfcode chat "message"`
             let initial_message = match &cli.command {
-                Some(Commands::Chat { message }) if !message.is_empty() => {
-                    Some(message.join(" "))
-                }
+                Some(Commands::Chat { message }) if !message.is_empty() => Some(message.join(" ")),
                 _ => None,
             };
             run_interactive(initial_message).await
@@ -471,7 +473,11 @@ fn run_compact() -> Result<()> {
     persistence::save_session(&session)?;
     println!(
         "{}",
-        format!("Compacted: {before} -> {} messages", session.conversation.len()).yellow()
+        format!(
+            "Compacted: {before} -> {} messages",
+            session.conversation.len()
+        )
+        .yellow()
     );
     Ok(())
 }
@@ -525,7 +531,10 @@ fn run_context_command(cmd: ContextCommands) -> Result<()> {
     match cmd {
         ContextCommands::Env => {
             let path = context::save_environment_context()?;
-            println!("{}", format!("Environment context saved: {}", path.display()).green());
+            println!(
+                "{}",
+                format!("Environment context saved: {}", path.display()).green()
+            );
             Ok(())
         }
         ContextCommands::Summary => {
@@ -546,7 +555,10 @@ fn run_context_command(cmd: ContextCommands) -> Result<()> {
         ContextCommands::List => {
             let dir = std::path::PathBuf::from(".bfcode").join("context");
             if !dir.exists() {
-                println!("{}", "No context files. Run `bfcode context env` to generate.".dimmed());
+                println!(
+                    "{}",
+                    "No context files. Run `bfcode context env` to generate.".dimmed()
+                );
                 return Ok(());
             }
             println!("{}", "Context files:".yellow().bold());
@@ -653,10 +665,7 @@ fn run_memory_command(cmd: MemoryCommands) -> Result<()> {
             } else {
                 persistence::save_memory(&mem)?
             };
-            println!(
-                "{}",
-                format!("Memory saved: {}", path.display()).green()
-            );
+            println!("{}", format!("Memory saved: {}", path.display()).green());
             Ok(())
         }
         MemoryCommands::Delete { name } => {
@@ -707,10 +716,7 @@ fn run_skills_command(cmd: SkillsCommands) -> Result<()> {
             match skill::import_skills(source) {
                 Ok(imported) => {
                     if imported.is_empty() {
-                        println!(
-                            "{}",
-                            "No valid skill files found to import.".yellow()
-                        );
+                        println!("{}", "No valid skill files found to import.".yellow());
                     } else {
                         for name in &imported {
                             println!("  {} {}", "Imported:".green(), name);
@@ -880,7 +886,10 @@ async fn run_daemon_command(cmd: DaemonCommands) -> Result<()> {
                     std::io::stdin().read_line(&mut input)?;
                     if input.trim().to_lowercase() == "y" {
                         daemon::self_update(&info).await?;
-                        println!("{}", "Updated successfully! Restart bfcode to use the new version.".green());
+                        println!(
+                            "{}",
+                            "Updated successfully! Restart bfcode to use the new version.".green()
+                        );
                     }
                 }
                 Ok(None) => println!("{}", "Already up to date.".green()),
@@ -924,11 +933,7 @@ fn run_cfg_command(cmd: CfgCommands) -> Result<()> {
                     Ok(value) => {
                         let errors = config::validate_config(&value);
                         if errors.is_empty() {
-                            println!(
-                                "  {} {}",
-                                "✓".green(),
-                                source.path.display()
-                            );
+                            println!("  {} {}", "✓".green(), source.path.display());
                         } else {
                             println!(
                                 "  {} {} ({} issue(s))",
@@ -942,12 +947,7 @@ fn run_cfg_command(cmd: CfgCommands) -> Result<()> {
                         }
                     }
                     Err(e) => {
-                        println!(
-                            "  {} {} — {}",
-                            "✗".red(),
-                            source.path.display(),
-                            e
-                        );
+                        println!("  {} {} — {}", "✗".red(), source.path.display(), e);
                     }
                 }
             }
@@ -980,10 +980,7 @@ fn run_cfg_command(cmd: CfgCommands) -> Result<()> {
                 );
             } else {
                 config::init_config(&path, fmt)?;
-                println!(
-                    "{}",
-                    format!("Created config: {}", path.display()).green()
-                );
+                println!("{}", format!("Created config: {}", path.display()).green());
             }
             Ok(())
         }
@@ -1021,11 +1018,7 @@ fn run_cfg_command(cmd: CfgCommands) -> Result<()> {
                             Ok(true) => {
                                 let json = serde_json::to_string_pretty(&value)?;
                                 std::fs::write(&source.path, &json)?;
-                                println!(
-                                    "  {} Migrated {}",
-                                    "✓".green(),
-                                    source.path.display()
-                                );
+                                println!("  {} Migrated {}", "✓".green(), source.path.display());
                                 migrated = true;
                             }
                             Ok(false) => {
@@ -1036,12 +1029,7 @@ fn run_cfg_command(cmd: CfgCommands) -> Result<()> {
                                 );
                             }
                             Err(e) => {
-                                println!(
-                                    "  {} {} — {}",
-                                    "✗".red(),
-                                    source.path.display(),
-                                    e
-                                );
+                                println!("  {} {} — {}", "✗".red(), source.path.display(), e);
                             }
                         }
                     }
@@ -1089,7 +1077,10 @@ fn run_config() -> Result<()> {
     println!("{}", "Configuration:".yellow().bold());
     println!("  Provider:    {}", format!("{provider}").cyan());
     println!("  Model:       {}", config.model.cyan());
-    println!("  Temperature: {}", format!("{}", config.temperature).cyan());
+    println!(
+        "  Temperature: {}",
+        format!("{}", config.temperature).cyan()
+    );
     println!(
         "  Context:     {} tokens",
         format!("{}", types::context_limit_for_model(&config.model)).cyan()
@@ -1175,7 +1166,11 @@ async fn run_interactive(initial_message: Option<String>) -> Result<()> {
         println!("Loaded:   {}", file_hint.dimmed());
     }
     println!();
-    println!("Type {} for commands, or use {} for CLI help", "/help".yellow(), "bfcode --help".yellow());
+    println!(
+        "Type {} for commands, or use {} for CLI help",
+        "/help".yellow(),
+        "bfcode --help".yellow()
+    );
     println!();
 
     // If an initial message was provided, process it first
@@ -1281,12 +1276,10 @@ async fn process_user_message(
     // Extract image attachments from input (e.g., @image.png or paths ending in image extensions)
     let (clean_input, images) = extract_images(input);
     if !images.is_empty() {
-        eprintln!(
-            "  {} Attached {} image(s)",
-            "+".green(),
-            images.len()
-        );
-        session.conversation.push(Message::user_with_images(&clean_input, images));
+        eprintln!("  {} Attached {} image(s)", "+".green(), images.len());
+        session
+            .conversation
+            .push(Message::user_with_images(&clean_input, images));
     } else {
         session.conversation.push(Message::user(input));
     }
@@ -1409,11 +1402,8 @@ async fn process_user_message(
 
         // Show token usage and cost
         if let Some(usage) = &response.usage {
-            let cost = types::calculate_cost(
-                &config.model,
-                usage.prompt_tokens,
-                usage.completion_tokens,
-            );
+            let cost =
+                types::calculate_cost(&config.model, usage.prompt_tokens, usage.completion_tokens);
             eprintln!(
                 "  {} tokens: {} this call | {} session total | cost: {}",
                 "~".dimmed(),
@@ -1469,7 +1459,10 @@ fn handle_command(
             println!("  {}  - change model", "/model <name>".yellow());
             println!("  {} - save a plan as .md file", "/plan <name>".yellow());
             println!("  {}        - list saved plans", "/plans".yellow());
-            println!("  {}       - export session as markdown", "/export".yellow());
+            println!(
+                "  {}       - export session as markdown",
+                "/export".yellow()
+            );
             println!("  {}      - show compaction summary", "/context".yellow());
             println!("  {}     - undo last N file changes", "/undo [n]".yellow());
             println!("  {} - send clipboard image", "/paste [msg]".yellow());
@@ -1484,21 +1477,45 @@ fn handle_command(
             println!("  {}     - paste from clipboard", "@clipboard".yellow());
             println!();
             println!("{}", "CLI commands (from shell):".yellow().bold());
-            println!("  {}              - start interactive chat", "bfcode".yellow());
-            println!("  {}    - send a message directly", "bfcode chat <msg>".yellow());
-            println!("  {} - list/new/resume/export", "bfcode session ...".yellow());
+            println!(
+                "  {}              - start interactive chat",
+                "bfcode".yellow()
+            );
+            println!(
+                "  {}    - send a message directly",
+                "bfcode chat <msg>".yellow()
+            );
+            println!(
+                "  {} - list/new/resume/export",
+                "bfcode session ...".yellow()
+            );
             println!("  {}  - get/set model", "bfcode model [name]".yellow());
             println!("  {}        - clear session", "bfcode clear".yellow());
-            println!("  {}      - compact conversation", "bfcode compact".yellow());
+            println!(
+                "  {}      - compact conversation",
+                "bfcode compact".yellow()
+            );
             println!("  {}  - list/create plans", "bfcode plan ...".yellow());
-            println!("  {} - env/summary/save/list/show", "bfcode context ...".yellow());
+            println!(
+                "  {} - env/summary/save/list/show",
+                "bfcode context ...".yellow()
+            );
             println!("  {}       - show configuration", "bfcode config".yellow());
             println!("  {}    - undo file changes", "bfcode undo [n]".yellow());
-            println!("  {} - list/show/import skills", "bfcode skills ...".yellow());
-            println!("  {} - list/add/remove cron jobs", "bfcode cron ...".yellow());
+            println!(
+                "  {} - list/show/import skills",
+                "bfcode skills ...".yellow()
+            );
+            println!(
+                "  {} - list/add/remove cron jobs",
+                "bfcode cron ...".yellow()
+            );
             println!("  {}       - run health checks", "bfcode doctor".yellow());
             println!("  {}  - system diagnostics", "bfcode diagnostics".yellow());
-            println!("  {} - start HTTP API server", "bfcode gateway ...".yellow());
+            println!(
+                "  {} - start HTTP API server",
+                "bfcode gateway ...".yellow()
+            );
             println!("  {}  - background service", "bfcode daemon ...".yellow());
             println!("  {}  - enhanced config mgmt", "bfcode cfg ...".yellow());
         }
@@ -1571,7 +1588,11 @@ fn handle_command(
         "/model" => {
             if arg.is_empty() {
                 let p = types::detect_provider(&config.model);
-                println!("Current model: {} ({})", config.model.cyan(), format!("{p}").dimmed());
+                println!(
+                    "Current model: {} ({})",
+                    config.model.cyan(),
+                    format!("{p}").dimmed()
+                );
             } else {
                 config.model = arg.to_string();
                 config.provider = types::detect_provider(arg);
@@ -1686,10 +1707,7 @@ fn handle_command(
                 match skill::find_skill(&skills, arg) {
                     Some(s) => {
                         // Inject skill content into system prompt
-                        let skill_prompt = format!(
-                            "\n\n# Skill: {}\n{}\n",
-                            s.name, s.content
-                        );
+                        let skill_prompt = format!("\n\n# Skill: {}\n{}\n", s.name, s.content);
                         if let Some(sys_msg) = session.conversation.first_mut() {
                             if sys_msg.role == "system" {
                                 if let Some(ref mut content) = sys_msg.content {
@@ -1704,7 +1722,10 @@ fn handle_command(
                         );
                     }
                     None => {
-                        println!("{}", format!("Skill '{}' not found. Use /skills to list.", arg).red());
+                        println!(
+                            "{}",
+                            format!("Skill '{}' not found. Use /skills to list.", arg).red()
+                        );
                     }
                 }
             }
@@ -1730,7 +1751,11 @@ fn handle_command(
                     match manager.add_job(parts[0], parts[1], "") {
                         Ok(id) => println!(
                             "{}",
-                            format!("Cron job added: {} (every {}, cmd: {})", id, parts[0], parts[1]).green()
+                            format!(
+                                "Cron job added: {} (every {}, cmd: {})",
+                                id, parts[0], parts[1]
+                            )
+                            .green()
                         ),
                         Err(e) => println!("{}", format!("Failed: {e}").red()),
                     }
@@ -1744,7 +1769,10 @@ fn handle_command(
                     Err(e) => println!("{}", format!("Failed: {e}").red()),
                 }
             } else {
-                println!("{}", "Usage: /cron [list|add <schedule> <cmd>|remove <id>]".yellow());
+                println!(
+                    "{}",
+                    "Usage: /cron [list|add <schedule> <cmd>|remove <id>]".yellow()
+                );
             }
         }
         _ => {
@@ -1838,11 +1866,7 @@ fn grab_clipboard_image() -> Option<types::ImageAttachment> {
     let image = clipboard.get_image().ok()?;
 
     // Convert RGBA pixels to PNG
-    let png_data = encode_rgba_to_png(
-        &image.bytes,
-        image.width as u32,
-        image.height as u32,
-    )?;
+    let png_data = encode_rgba_to_png(&image.bytes, image.width as u32, image.height as u32)?;
 
     let base64_data = base64_encode(&png_data);
     Some(types::ImageAttachment {
@@ -1987,10 +2011,11 @@ fn base64_encode(data: &[u8]) -> String {
     let mut buf = Vec::new();
     {
         let mut encoder = Base64Encoder::new(&mut buf);
-        encoder.write_all(data).unwrap();
-        encoder.finish().unwrap();
+        // Writing to Vec<u8> is infallible; from_utf8 always succeeds on base64 output
+        let _ = encoder.write_all(data);
+        let _ = encoder.finish();
     }
-    String::from_utf8(buf).unwrap()
+    String::from_utf8(buf).unwrap_or_default()
 }
 
 /// Minimal base64 encoder
@@ -2004,13 +2029,19 @@ const B64_CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0
 
 impl<W: std::io::Write> Base64Encoder<W> {
     fn new(writer: W) -> Self {
-        Self { writer, buf: [0; 3], buf_len: 0 }
+        Self {
+            writer,
+            buf: [0; 3],
+            buf_len: 0,
+        }
     }
 
     fn encode_block(&mut self) -> std::io::Result<()> {
         let b = &self.buf;
         let n = self.buf_len;
-        if n == 0 { return Ok(()); }
+        if n == 0 {
+            return Ok(());
+        }
 
         let mut out = [b'='; 4];
         out[0] = B64_CHARS[(b[0] >> 2) as usize];
@@ -2144,7 +2175,9 @@ mod tests {
         F: FnOnce() -> Fut + Send,
         Fut: std::future::Future<Output = ()>,
     {
-        let _lock = test_utils::CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = test_utils::CWD_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let tmp = std::env::temp_dir().join(format!(
             "bfcode_test_main_async_{}_{:?}",
             std::process::id(),
@@ -2166,17 +2199,20 @@ mod tests {
     #[tokio::test]
     async fn test_agent_loop_text_response() {
         run_in_tmp(|| async {
-            let mock = MockClient::new(vec![MockClient::text_response(
-                "Hello! How can I help?",
-            )]);
+            let mock = MockClient::new(vec![MockClient::text_response("Hello! How can I help?")]);
             let tool_defs = tools::get_tool_definitions();
             let permissions = tools::Permissions::new();
             let mut session = new_test_session();
             let mut config = GlobalConfig::default();
 
             process_user_message(
-                "hi there", &mut session, &mut config, "sys",
-                &mock, &tool_defs, &permissions,
+                "hi there",
+                &mut session,
+                &mut config,
+                "sys",
+                &mock,
+                &tool_defs,
+                &permissions,
             )
             .await
             .unwrap();
@@ -2185,7 +2221,10 @@ mod tests {
             assert_eq!(session.conversation[1].role, "user");
             assert_eq!(session.conversation[1].content.as_deref(), Some("hi there"));
             assert_eq!(session.conversation[2].role, "assistant");
-            assert_eq!(session.conversation[2].content.as_deref(), Some("Hello! How can I help?"));
+            assert_eq!(
+                session.conversation[2].content.as_deref(),
+                Some("Hello! How can I help?")
+            );
             assert_eq!(session.total_tokens, 15);
             assert_eq!(session.title, "hi there");
         })
@@ -2199,7 +2238,9 @@ mod tests {
         run_in_tmp(|| async {
             let mock = MockClient::new(vec![
                 MockClient::tool_call_response(vec![(
-                    "call_1".into(), "list_files".into(), r#"{"path":"."}"#.into(),
+                    "call_1".into(),
+                    "list_files".into(),
+                    r#"{"path":"."}"#.into(),
                 )]),
                 MockClient::text_response("I see the project files."),
             ]);
@@ -2209,8 +2250,13 @@ mod tests {
             let mut config = GlobalConfig::default();
 
             process_user_message(
-                "what files are here?", &mut session, &mut config, "sys",
-                &mock, &tool_defs, &permissions,
+                "what files are here?",
+                &mut session,
+                &mut config,
+                "sys",
+                &mock,
+                &tool_defs,
+                &permissions,
             )
             .await
             .unwrap();
@@ -2219,9 +2265,15 @@ mod tests {
             assert_eq!(session.conversation[2].role, "assistant");
             assert!(session.conversation[2].tool_calls.is_some());
             assert_eq!(session.conversation[3].role, "tool");
-            assert_eq!(session.conversation[3].tool_call_id.as_deref(), Some("call_1"));
+            assert_eq!(
+                session.conversation[3].tool_call_id.as_deref(),
+                Some("call_1")
+            );
             assert_eq!(session.conversation[4].role, "assistant");
-            assert_eq!(session.conversation[4].content.as_deref(), Some("I see the project files."));
+            assert_eq!(
+                session.conversation[4].content.as_deref(),
+                Some("I see the project files.")
+            );
             assert_eq!(mock.requests().len(), 2);
             assert!(mock.requests()[1].messages.iter().any(|m| m.role == "tool"));
         })
@@ -2246,14 +2298,23 @@ mod tests {
             let mut config = GlobalConfig::default();
 
             process_user_message(
-                "list root and src", &mut session, &mut config, "sys",
-                &mock, &tool_defs, &permissions,
+                "list root and src",
+                &mut session,
+                &mut config,
+                "sys",
+                &mock,
+                &tool_defs,
+                &permissions,
             )
             .await
             .unwrap();
 
             assert_eq!(session.conversation.len(), 6);
-            let tool_results: Vec<_> = session.conversation.iter().filter(|m| m.role == "tool").collect();
+            let tool_results: Vec<_> = session
+                .conversation
+                .iter()
+                .filter(|m| m.role == "tool")
+                .collect();
             assert_eq!(tool_results.len(), 2);
         })
         .await;
@@ -2266,10 +2327,14 @@ mod tests {
         run_in_tmp(|| async {
             let mock = MockClient::new(vec![
                 MockClient::tool_call_response(vec![(
-                    "c1".into(), "list_files".into(), r#"{"path":"."}"#.into(),
+                    "c1".into(),
+                    "list_files".into(),
+                    r#"{"path":"."}"#.into(),
                 )]),
                 MockClient::tool_call_response(vec![(
-                    "c2".into(), "list_files".into(), r#"{"path":"."}"#.into(),
+                    "c2".into(),
+                    "list_files".into(),
+                    r#"{"path":"."}"#.into(),
                 )]),
                 MockClient::text_response("All done with both lookups."),
             ]);
@@ -2279,8 +2344,13 @@ mod tests {
             let mut config = GlobalConfig::default();
 
             let _ = process_user_message(
-                "explore the project", &mut session, &mut config, "sys",
-                &mock, &tool_defs, &permissions,
+                "explore the project",
+                &mut session,
+                &mut config,
+                "sys",
+                &mock,
+                &tool_defs,
+                &permissions,
             )
             .await;
 
@@ -2305,8 +2375,13 @@ mod tests {
             let mut config = GlobalConfig::default();
 
             let _ = process_user_message(
-                "this will fail", &mut session, &mut config, "sys",
-                &mock, &tool_defs, &permissions,
+                "this will fail",
+                &mut session,
+                &mut config,
+                "sys",
+                &mock,
+                &tool_defs,
+                &permissions,
             )
             .await;
 
@@ -2332,8 +2407,13 @@ mod tests {
             config.temperature = 0.7;
 
             process_user_message(
-                "test input", &mut session, &mut config, "sys",
-                &mock, &tool_defs, &permissions,
+                "test input",
+                &mut session,
+                &mut config,
+                "sys",
+                &mock,
+                &tool_defs,
+                &permissions,
             )
             .await
             .unwrap();
@@ -2362,8 +2442,13 @@ mod tests {
             assert_eq!(session.title, "New session");
 
             process_user_message(
-                "refactor the auth module to use JWT", &mut session, &mut config, "sys",
-                &mock, &tool_defs, &permissions,
+                "refactor the auth module to use JWT",
+                &mut session,
+                &mut config,
+                "sys",
+                &mock,
+                &tool_defs,
+                &permissions,
             )
             .await
             .unwrap();
@@ -2384,8 +2469,13 @@ mod tests {
 
             let long_msg = "a".repeat(100);
             process_user_message(
-                &long_msg, &mut session, &mut config, "sys",
-                &mock, &tool_defs, &permissions,
+                &long_msg,
+                &mut session,
+                &mut config,
+                "sys",
+                &mock,
+                &tool_defs,
+                &permissions,
             )
             .await
             .unwrap();
@@ -2410,15 +2500,25 @@ mod tests {
             let mut config = GlobalConfig::default();
 
             process_user_message(
-                "hi", &mut session, &mut config, "sys",
-                &mock, &tool_defs, &permissions,
+                "hi",
+                &mut session,
+                &mut config,
+                "sys",
+                &mock,
+                &tool_defs,
+                &permissions,
             )
             .await
             .unwrap();
 
             process_user_message(
-                "help me refactor", &mut session, &mut config, "sys",
-                &mock, &tool_defs, &permissions,
+                "help me refactor",
+                &mut session,
+                &mut config,
+                "sys",
+                &mock,
+                &tool_defs,
+                &permissions,
             )
             .await
             .unwrap();
@@ -2442,7 +2542,8 @@ mod tests {
 
             let mock = MockClient::new(vec![
                 MockClient::tool_call_response(vec![(
-                    "c1".into(), "read".into(),
+                    "c1".into(),
+                    "read".into(),
                     r#"{"path":"hello.txt"}"#.into(),
                 )]),
                 MockClient::text_response("The file contains world content."),
@@ -2453,15 +2554,27 @@ mod tests {
             let mut config = GlobalConfig::default();
 
             process_user_message(
-                "read hello.txt", &mut session, &mut config, "sys",
-                &mock, &tool_defs, &permissions,
+                "read hello.txt",
+                &mut session,
+                &mut config,
+                "sys",
+                &mock,
+                &tool_defs,
+                &permissions,
             )
             .await
             .unwrap();
 
-            let tool_msg = session.conversation.iter().find(|m| m.role == "tool").unwrap();
+            let tool_msg = session
+                .conversation
+                .iter()
+                .find(|m| m.role == "tool")
+                .unwrap();
             let content = tool_msg.content.as_deref().unwrap();
-            assert!(content.contains("world content here"), "Read should return file content: {content}");
+            assert!(
+                content.contains("world content here"),
+                "Read should return file content: {content}"
+            );
         })
         .await;
     }
@@ -2485,8 +2598,13 @@ mod tests {
             let mut config = GlobalConfig::default();
 
             let result = process_user_message(
-                "test", &mut session, &mut config, "sys",
-                &mock, &tool_defs, &permissions,
+                "test",
+                &mut session,
+                &mut config,
+                "sys",
+                &mock,
+                &tool_defs,
+                &permissions,
             )
             .await;
 
@@ -2530,7 +2648,11 @@ mod tests {
         let encoded = base64_encode(&data);
         assert!(!encoded.is_empty());
         // Verify it's valid base64 chars
-        assert!(encoded.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '='));
+        assert!(
+            encoded
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=')
+        );
     }
 
     // ── Image extraction ────────────────────────────────────────────
@@ -2633,8 +2755,7 @@ mod tests {
     fn test_encode_rgba_to_png_small_image() {
         // 2x2 image
         let rgba = vec![
-            255, 0, 0, 255,  0, 255, 0, 255,
-            0, 0, 255, 255,  255, 255, 255, 255,
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
         ];
         let png = encode_rgba_to_png(&rgba, 2, 2).unwrap();
         assert!(png.len() > 50); // Should be a reasonable size
@@ -2661,13 +2782,21 @@ mod tests {
     fn test_compact_conversation_uses_structured_summary() {
         with_tmp(|| {
             let mut session = ProjectSession::new();
-            session.conversation.push(Message::system("You are helpful."));
+            session
+                .conversation
+                .push(Message::system("You are helpful."));
             session.conversation.push(Message::user("fix the bug"));
-            session.conversation.push(Message::assistant_text("Looking at it."));
+            session
+                .conversation
+                .push(Message::assistant_text("Looking at it."));
 
             for i in 0..12 {
-                session.conversation.push(Message::user(&format!("step {i}")));
-                session.conversation.push(Message::assistant_text(&format!("done {i}")));
+                session
+                    .conversation
+                    .push(Message::user(&format!("step {i}")));
+                session
+                    .conversation
+                    .push(Message::assistant_text(&format!("done {i}")));
             }
 
             compact_conversation(&mut session, "You are helpful.");
@@ -2693,8 +2822,13 @@ mod tests {
             let mut config = GlobalConfig::default();
 
             process_user_message(
-                "hello", &mut session, &mut config, "sys",
-                &mock, &tool_defs, &permissions,
+                "hello",
+                &mut session,
+                &mut config,
+                "sys",
+                &mock,
+                &tool_defs,
+                &permissions,
             )
             .await
             .unwrap();
@@ -2741,9 +2875,13 @@ mod tests {
                 if i == 5 {
                     // Add a large tool result
                     let big_output = "x".repeat(5000);
-                    session.conversation.push(Message::tool_result("tc", &big_output));
+                    session
+                        .conversation
+                        .push(Message::tool_result("tc", &big_output));
                 }
-                session.conversation.push(Message::assistant_text(&format!("a{i}")));
+                session
+                    .conversation
+                    .push(Message::assistant_text(&format!("a{i}")));
             }
 
             let before = session.conversation.len();
@@ -2754,7 +2892,11 @@ mod tests {
             for msg in &session.conversation {
                 if msg.role == "tool" {
                     if let Some(content) = &msg.content {
-                        assert!(content.len() <= 2100, "Tool output should be truncated: {} chars", content.len());
+                        assert!(
+                            content.len() <= 2100,
+                            "Tool output should be truncated: {} chars",
+                            content.len()
+                        );
                     }
                 }
             }
@@ -2765,11 +2907,14 @@ mod tests {
 
     #[test]
     fn test_detect_provider_from_model() {
-        use types::detect_provider;
         use types::Provider;
+        use types::detect_provider;
 
         assert_eq!(detect_provider("gpt-4o-mini"), Provider::OpenAI);
-        assert_eq!(detect_provider("claude-sonnet-4-20250514"), Provider::Anthropic);
+        assert_eq!(
+            detect_provider("claude-sonnet-4-20250514"),
+            Provider::Anthropic
+        );
         assert_eq!(detect_provider("grok-4-1-fast"), Provider::Grok);
         assert_eq!(detect_provider("custom-model"), Provider::Grok); // default
     }
@@ -2785,7 +2930,9 @@ mod tests {
         let t2 = context::estimate_conversation_tokens(&session.conversation);
         assert!(t2 > t1);
 
-        session.conversation.push(Message::assistant_text("I can help with that, here's a detailed response about your question."));
+        session.conversation.push(Message::assistant_text(
+            "I can help with that, here's a detailed response about your question.",
+        ));
         let t3 = context::estimate_conversation_tokens(&session.conversation);
         assert!(t3 > t2);
     }

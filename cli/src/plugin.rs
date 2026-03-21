@@ -3,7 +3,7 @@ use colored::Colorize;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 /// Hook execution points in the CLI lifecycle.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -316,9 +316,7 @@ mod tests {
             enabled: true,
             pattern: None,
         };
-        let mgr = HookManager {
-            hooks: vec![hook],
-        };
+        let mgr = HookManager { hooks: vec![hook] };
         let ctx = HookContext {
             session_id: "test-123".to_string(),
             ..Default::default()
@@ -336,9 +334,7 @@ mod tests {
             enabled: true,
             pattern: Some("bash".to_string()),
         };
-        let mgr = HookManager {
-            hooks: vec![hook],
-        };
+        let mgr = HookManager { hooks: vec![hook] };
 
         // Should not match when tool_name differs.
         let ctx = HookContext {
@@ -366,9 +362,7 @@ mod tests {
             enabled: false,
             pattern: None,
         };
-        let mgr = HookManager {
-            hooks: vec![hook],
-        };
+        let mgr = HookManager { hooks: vec![hook] };
         let ctx = HookContext::default();
         // Disabled hook should not run (exit 1 would produce a warning).
         mgr.run_hooks(HookType::SessionStart, &ctx).await;

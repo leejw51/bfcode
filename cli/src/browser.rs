@@ -58,7 +58,13 @@ impl BrowserManager {
         }
 
         // Check PATH for linux-style names (works on both linux and mac with homebrew)
-        let names = ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "chrome"];
+        let names = [
+            "google-chrome",
+            "google-chrome-stable",
+            "chromium",
+            "chromium-browser",
+            "chrome",
+        ];
         for name in &names {
             if let Ok(output) = std::process::Command::new("which").arg(name).output() {
                 if output.status.success() {
@@ -78,7 +84,9 @@ impl BrowserManager {
 /// Returns the CDP base URL.
 async fn ensure_chrome_running() -> Result<String> {
     {
-        let mgr = BROWSER.lock().unwrap();
+        let mgr = BROWSER
+            .lock()
+            .map_err(|_| anyhow::anyhow!("browser mutex poisoned"))?;
         if let Some(ref url) = mgr.debug_url {
             // Verify it's still responsive
             let check_url = url.clone();
@@ -86,11 +94,18 @@ async fn ensure_chrome_running() -> Result<String> {
             let client = reqwest::Client::builder()
                 .timeout(Duration::from_secs(2))
                 .build()?;
-            if client.get(format!("{}/json/version", check_url)).send().await.is_ok() {
+            if client
+                .get(format!("{}/json/version", check_url))
+                .send()
+                .await
+                .is_ok()
+            {
                 return Ok(check_url);
             }
             // Not responsive — we'll relaunch below
-            let mut mgr = BROWSER.lock().unwrap();
+            let mut mgr = BROWSER
+                .lock()
+                .map_err(|_| anyhow::anyhow!("browser mutex poisoned"))?;
             mgr.debug_url = None;
             if let Some(ref mut child) = mgr.process {
                 let _ = child.kill().await;
@@ -148,7 +163,9 @@ async fn ensure_chrome_running() -> Result<String> {
         }
     }
 
-    let mut mgr = BROWSER.lock().unwrap();
+    let mut mgr = BROWSER
+        .lock()
+        .map_err(|_| anyhow::anyhow!("browser mutex poisoned"))?;
     mgr.process = Some(child);
     mgr.debug_url = Some(base_url.clone());
 
@@ -185,7 +202,11 @@ async fn get_page_ws_url(base_url: &str) -> Result<String> {
 
 /// Send a CDP command via the /json/protocol HTTP endpoint.
 /// For commands that don't need WebSocket streaming, we use the CDP HTTP endpoint.
-async fn cdp_send(base_url: &str, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
+async fn cdp_send(
+    base_url: &str,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value> {
     // We need to get the target id first
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
@@ -219,7 +240,10 @@ async fn cdp_send(base_url: &str, method: &str, params: serde_json::Value) -> Re
 
     // Navigate using the /json endpoint trick
     if method == "Page.navigate" {
-        let url = params.get("url").and_then(|v| v.as_str()).unwrap_or("about:blank");
+        let url = params
+            .get("url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("about:blank");
         // Close old page and open new one with the URL
         let _ = client
             .get(format!("{}/json/close/{}", base_url, target_id))
@@ -238,7 +262,9 @@ async fn cdp_send(base_url: &str, method: &str, params: serde_json::Value) -> Re
     }
 
     // For other methods, return an unsupported error — we handle them differently
-    Ok(serde_json::json!({"error": format!("Direct CDP call for {} not supported via HTTP", method)}))
+    Ok(
+        serde_json::json!({"error": format!("Direct CDP call for {} not supported via HTTP", method)}),
+    )
 }
 
 /// Simple HTML tag stripping (mirrors the one in tools.rs for self-contained use)
@@ -318,8 +344,7 @@ pub async fn browser_navigate(url: &str) -> Result<String> {
 
     // Use Chrome's --dump-dom to get rendered HTML for the URL.
     // This is more reliable than trying to control a running instance without WebSocket.
-    let chrome_path = BrowserManager::find_chrome()
-        .context("Chrome not found")?;
+    let chrome_path = BrowserManager::find_chrome().context("Chrome not found")?;
 
     let output = tokio::process::Command::new(&chrome_path)
         .arg("--headless=new")
@@ -347,10 +372,7 @@ pub async fn browser_navigate(url: &str) -> Result<String> {
             .build()?;
 
         // Close existing page targets and open the new URL
-        let resp = client
-            .get(format!("{}/json/list", base_url))
-            .send()
-            .await;
+        let resp = client.get(format!("{}/json/list", base_url)).send().await;
 
         if let Ok(resp) = resp {
             if let Ok(targets) = resp.json::<Vec<serde_json::Value>>().await {
@@ -376,7 +398,9 @@ pub async fn browser_navigate(url: &str) -> Result<String> {
 
     // Track current URL
     {
-        let mut mgr = BROWSER.lock().unwrap();
+        let mut mgr = BROWSER
+            .lock()
+            .map_err(|_| anyhow::anyhow!("browser mutex poisoned"))?;
         mgr.current_url = Some(url.to_string());
     }
 
@@ -396,16 +420,15 @@ pub async fn browser_navigate(url: &str) -> Result<String> {
 /// Take a screenshot of the current page, save to file, return path.
 pub async fn browser_screenshot(output_path: Option<&str>) -> Result<String> {
     let current_url = {
-        let mgr = BROWSER.lock().unwrap();
+        let mgr = BROWSER
+            .lock()
+            .map_err(|_| anyhow::anyhow!("browser mutex poisoned"))?;
         mgr.current_url.clone()
     };
 
-    let url = current_url
-        .as_deref()
-        .unwrap_or("about:blank");
+    let url = current_url.as_deref().unwrap_or("about:blank");
 
-    let chrome_path = BrowserManager::find_chrome()
-        .context("Chrome not found")?;
+    let chrome_path = BrowserManager::find_chrome().context("Chrome not found")?;
 
     let screenshot_path = match output_path {
         Some(p) => PathBuf::from(p),
@@ -420,11 +443,7 @@ pub async fn browser_screenshot(output_path: Option<&str>) -> Result<String> {
         std::fs::create_dir_all(parent)?;
     }
 
-    eprintln!(
-        "{} Taking screenshot of {}",
-        "[browser]".blue(),
-        url.cyan()
-    );
+    eprintln!("{} Taking screenshot of {}", "[browser]".blue(), url.cyan());
 
     let output = tokio::process::Command::new(&chrome_path)
         .arg("--headless=new")
@@ -444,11 +463,18 @@ pub async fn browser_screenshot(output_path: Option<&str>) -> Result<String> {
     }
 
     if !screenshot_path.exists() {
-        bail!("Screenshot file was not created at {}", screenshot_path.display());
+        bail!(
+            "Screenshot file was not created at {}",
+            screenshot_path.display()
+        );
     }
 
     let path_str = screenshot_path.display().to_string();
-    eprintln!("{} Screenshot saved to {}", "[browser]".green(), path_str.cyan());
+    eprintln!(
+        "{} Screenshot saved to {}",
+        "[browser]".green(),
+        path_str.cyan()
+    );
 
     Ok(format!("Screenshot saved to {}", path_str))
 }
@@ -499,16 +525,15 @@ pub async fn browser_type(selector: &str, text: &str) -> Result<String> {
 pub async fn browser_evaluate(script: &str) -> Result<String> {
     let base_url = ensure_chrome_running().await?;
     let current_url = {
-        let mgr = BROWSER.lock().unwrap();
+        let mgr = BROWSER
+            .lock()
+            .map_err(|_| anyhow::anyhow!("browser mutex poisoned"))?;
         mgr.current_url.clone()
     };
 
-    let url = current_url
-        .as_deref()
-        .unwrap_or("about:blank");
+    let url = current_url.as_deref().unwrap_or("about:blank");
 
-    let chrome_path = BrowserManager::find_chrome()
-        .context("Chrome not found")?;
+    let chrome_path = BrowserManager::find_chrome().context("Chrome not found")?;
 
     // Wrap script to print result so we can capture it via --dump-dom
     // We navigate to the page, then evaluate the script and write the result to the DOM
@@ -588,7 +613,9 @@ pub async fn browser_evaluate(script: &str) -> Result<String> {
 
 /// Close the browser.
 pub async fn browser_close() -> Result<String> {
-    let mut mgr = BROWSER.lock().unwrap();
+    let mut mgr = BROWSER
+        .lock()
+        .map_err(|_| anyhow::anyhow!("browser mutex poisoned"))?;
 
     if let Some(ref mut child) = mgr.process {
         eprintln!("{} Closing browser...", "[browser]".blue());

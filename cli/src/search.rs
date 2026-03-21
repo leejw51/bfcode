@@ -28,10 +28,10 @@ pub struct SearchResult {
 /// Common English stop words to filter out during tokenization.
 const STOP_WORDS: &[&str] = &[
     "a", "an", "and", "are", "as", "at", "be", "been", "but", "by", "do", "for", "from", "had",
-    "has", "have", "he", "her", "his", "how", "if", "in", "into", "is", "it", "its", "just",
-    "me", "my", "no", "not", "of", "on", "or", "our", "out", "so", "than", "that", "the",
-    "their", "them", "then", "there", "these", "they", "this", "to", "up", "us", "was", "we",
-    "were", "what", "when", "which", "who", "will", "with", "would", "you", "your",
+    "has", "have", "he", "her", "his", "how", "if", "in", "into", "is", "it", "its", "just", "me",
+    "my", "no", "not", "of", "on", "or", "our", "out", "so", "than", "that", "the", "their",
+    "them", "then", "there", "these", "they", "this", "to", "up", "us", "was", "we", "were",
+    "what", "when", "which", "who", "will", "with", "would", "you", "your",
 ];
 
 impl TfidfIndex {

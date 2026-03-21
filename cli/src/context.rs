@@ -181,9 +181,9 @@ pub fn build_compaction_summary(session: &ProjectSession) -> String {
                     for tc in tool_calls {
                         match tc.function.name.as_str() {
                             "read" | "write" | "edit" => {
-                                if let Ok(args) =
-                                    serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
-                                {
+                                if let Ok(args) = serde_json::from_str::<serde_json::Value>(
+                                    &tc.function.arguments,
+                                ) {
                                     if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
                                         files_seen.insert(path.to_string());
                                     }
@@ -197,11 +197,10 @@ pub fn build_compaction_summary(session: &ProjectSession) -> String {
                                 ));
                             }
                             "bash" => {
-                                if let Ok(args) =
-                                    serde_json::from_str::<serde_json::Value>(&tc.function.arguments)
-                                {
-                                    if let Some(cmd) =
-                                        args.get("command").and_then(|v| v.as_str())
+                                if let Ok(args) = serde_json::from_str::<serde_json::Value>(
+                                    &tc.function.arguments,
+                                ) {
+                                    if let Some(cmd) = args.get("command").and_then(|v| v.as_str())
                                     {
                                         discoveries.push(format!(
                                             "Ran: `{}`",
@@ -268,7 +267,10 @@ pub fn build_compaction_summary(session: &ProjectSession) -> String {
 
     COMPACTION_TEMPLATE
         .replace("{goal}", &goal)
-        .replace("{instructions}", "Continue from previous context. Refer to the summary below.")
+        .replace(
+            "{instructions}",
+            "Continue from previous context. Refer to the summary below.",
+        )
         .replace("{discoveries}", &discoveries_text)
         .replace("{accomplished}", &accomplished_text)
         .replace("{files}", &files_text)
@@ -358,12 +360,7 @@ pub fn load_context_files() -> Option<String> {
     let mut entries: Vec<_> = std::fs::read_dir(&dir)
         .ok()?
         .flatten()
-        .filter(|e| {
-            e.path()
-                .extension()
-                .map(|ext| ext == "md")
-                .unwrap_or(false)
-        })
+        .filter(|e| e.path().extension().map(|ext| ext == "md").unwrap_or(false))
         .collect();
 
     // Sort by name for deterministic ordering
@@ -413,17 +410,16 @@ fn looks_like_file_path(s: &str) -> bool {
     }
     // Common file extensions
     let extensions = [
-        ".rs", ".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".java", ".c", ".cpp", ".h",
-        ".toml", ".json", ".yaml", ".yml", ".md", ".txt", ".sh", ".css", ".html", ".sql",
-        ".lock", ".cfg", ".ini", ".env", ".xml",
+        ".rs", ".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".java", ".c", ".cpp", ".h", ".toml",
+        ".json", ".yaml", ".yml", ".md", ".txt", ".sh", ".css", ".html", ".sql", ".lock", ".cfg",
+        ".ini", ".env", ".xml",
     ];
     // Exclude URLs
     if s.contains("://") {
         return false;
     }
     // Check if it ends with a known extension or looks like a path
-    extensions.iter().any(|ext| s.ends_with(ext))
-        || (s.contains('/') && !s.contains(' '))
+    extensions.iter().any(|ext| s.ends_with(ext)) || (s.contains('/') && !s.contains(' '))
 }
 
 fn truncate_line(s: &str, max: usize) -> String {
@@ -554,45 +550,72 @@ mod tests {
         s.total_tokens = 12345;
 
         s.conversation.push(Message::system("You are bfcode."));
-        s.conversation.push(Message::user("refactor the auth module to use JWT tokens"));
+        s.conversation
+            .push(Message::user("refactor the auth module to use JWT tokens"));
         s.conversation.push(Message::assistant_text(
             "I'll start by reading the current auth code in `src/auth.rs`.",
         ));
-        s.conversation.push(Message::assistant_tool_calls(vec![
-            make_tool_call("c1", "read", r#"{"path":"src/auth.rs"}"#),
-        ]));
+        s.conversation
+            .push(Message::assistant_tool_calls(vec![make_tool_call(
+                "c1",
+                "read",
+                r#"{"path":"src/auth.rs"}"#,
+            )]));
         s.conversation.push(Message::tool_result(
             "c1",
             "pub fn login(user: &str, pass: &str) -> bool { true }",
         ));
-        s.conversation.push(Message::assistant_tool_calls(vec![
-            make_tool_call("c2", "grep", r#"{"pattern":"session","path":"src/"}"#),
-        ]));
+        s.conversation
+            .push(Message::assistant_tool_calls(vec![make_tool_call(
+                "c2",
+                "grep",
+                r#"{"pattern":"session","path":"src/"}"#,
+            )]));
         s.conversation.push(Message::tool_result(
             "c2",
             "src/auth.rs:5: fn create_session()\nsrc/main.rs:12: use auth::create_session;",
         ));
-        s.conversation.push(Message::assistant_tool_calls(vec![
-            make_tool_call("c3", "bash", r#"{"command":"cargo test --lib"}"#),
-        ]));
-        s.conversation.push(Message::tool_result("c3", "test result: ok. 10 passed"));
-        s.conversation.push(Message::assistant_tool_calls(vec![
-            make_tool_call("c4", "edit", r#"{"path":"src/auth.rs","old_string":"true","new_string":"jwt::verify(token)"}"#),
-        ]));
-        s.conversation.push(Message::tool_result("c4", "Edited src/auth.rs: 1 replacement"));
-        s.conversation.push(Message::assistant_tool_calls(vec![
-            make_tool_call("c5", "write", r#"{"path":"src/jwt.rs","content":"pub fn verify(t: &str) -> bool { true }"}"#),
-        ]));
-        s.conversation.push(Message::tool_result("c5", "Wrote src/jwt.rs (39 bytes)"));
+        s.conversation
+            .push(Message::assistant_tool_calls(vec![make_tool_call(
+                "c3",
+                "bash",
+                r#"{"command":"cargo test --lib"}"#,
+            )]));
+        s.conversation
+            .push(Message::tool_result("c3", "test result: ok. 10 passed"));
+        s.conversation
+            .push(Message::assistant_tool_calls(vec![make_tool_call(
+                "c4",
+                "edit",
+                r#"{"path":"src/auth.rs","old_string":"true","new_string":"jwt::verify(token)"}"#,
+            )]));
+        s.conversation.push(Message::tool_result(
+            "c4",
+            "Edited src/auth.rs: 1 replacement",
+        ));
+        s.conversation
+            .push(Message::assistant_tool_calls(vec![make_tool_call(
+                "c5",
+                "write",
+                r#"{"path":"src/jwt.rs","content":"pub fn verify(t: &str) -> bool { true }"}"#,
+            )]));
+        s.conversation
+            .push(Message::tool_result("c5", "Wrote src/jwt.rs (39 bytes)"));
         s.conversation.push(Message::assistant_text(
             "Done! I've refactored auth to use JWT. Created `src/jwt.rs` and updated `src/auth.rs`.",
         ));
-        s.conversation.push(Message::user("looks good, run tests again"));
-        s.conversation.push(Message::assistant_tool_calls(vec![
-            make_tool_call("c6", "bash", r#"{"command":"cargo test"}"#),
-        ]));
-        s.conversation.push(Message::tool_result("c6", "test result: ok. 15 passed"));
-        s.conversation.push(Message::assistant_text("All 15 tests pass."));
+        s.conversation
+            .push(Message::user("looks good, run tests again"));
+        s.conversation
+            .push(Message::assistant_tool_calls(vec![make_tool_call(
+                "c6",
+                "bash",
+                r#"{"command":"cargo test"}"#,
+            )]));
+        s.conversation
+            .push(Message::tool_result("c6", "test result: ok. 15 passed"));
+        s.conversation
+            .push(Message::assistant_text("All 15 tests pass."));
 
         s
     }
@@ -689,7 +712,9 @@ mod tests {
             make_tool_call("c1", "read", r#"{"path":"a.rs"}"#),
             make_tool_call("c2", "read", r#"{"path":"b.rs"}"#),
         ];
-        session.conversation.push(Message::assistant_tool_calls(tcs));
+        session
+            .conversation
+            .push(Message::assistant_tool_calls(tcs));
 
         let md = format_transcript(&session);
         assert!(md.contains(r#""path":"a.rs""#));
@@ -780,7 +805,9 @@ mod tests {
     #[test]
     fn test_build_compaction_summary_with_conversation() {
         let mut session = ProjectSession::new();
-        session.conversation.push(Message::user("fix the login bug"));
+        session
+            .conversation
+            .push(Message::user("fix the login bug"));
         session
             .conversation
             .push(Message::assistant_text("I'll look at the auth module"));
@@ -837,9 +864,17 @@ mod tests {
     #[test]
     fn test_build_compaction_summary_extracts_files_from_write() {
         let mut session = ProjectSession::new();
-        session.conversation.push(Message::user("create a new file"));
-        let tc = make_tool_call("c1", "write", r#"{"path":"src/new_module.rs","content":"// new"}"#);
-        session.conversation.push(Message::assistant_tool_calls(vec![tc]));
+        session
+            .conversation
+            .push(Message::user("create a new file"));
+        let tc = make_tool_call(
+            "c1",
+            "write",
+            r#"{"path":"src/new_module.rs","content":"// new"}"#,
+        );
+        session
+            .conversation
+            .push(Message::assistant_tool_calls(vec![tc]));
 
         let summary = build_compaction_summary(&session);
         assert!(summary.contains("`src/new_module.rs`"));
@@ -854,7 +889,9 @@ mod tests {
             "edit",
             r#"{"path":"README.md","old_string":"helo","new_string":"hello"}"#,
         );
-        session.conversation.push(Message::assistant_tool_calls(vec![tc]));
+        session
+            .conversation
+            .push(Message::assistant_tool_calls(vec![tc]));
 
         let summary = build_compaction_summary(&session);
         assert!(summary.contains("`README.md`"));
@@ -890,10 +927,7 @@ mod tests {
 
         let summary = build_compaction_summary(&session);
         // Goal should be truncated to 500 chars
-        let goal_section = summary
-            .split("## Instructions")
-            .next()
-            .unwrap();
+        let goal_section = summary.split("## Instructions").next().unwrap();
         // The x's in the goal section should be <= 500
         let x_count = goal_section.matches('x').count();
         assert!(x_count <= 500);
@@ -938,9 +972,9 @@ mod tests {
     fn test_build_environment_context_has_valid_date() {
         let ctx = build_environment_context();
         // Should contain a date-like pattern YYYY-MM-DD
-        let has_date = ctx.lines().any(|l| {
-            l.contains("Date") && l.contains('-') && l.len() > 15
-        });
+        let has_date = ctx
+            .lines()
+            .any(|l| l.contains("Date") && l.contains('-') && l.len() > 15);
         assert!(has_date);
     }
 

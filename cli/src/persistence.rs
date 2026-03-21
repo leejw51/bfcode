@@ -1,4 +1,6 @@
-use crate::types::{ContextMemory, FileSnapshot, GlobalConfig, MemoryType, INSTRUCTION_FILES, ProjectSession};
+use crate::types::{
+    ContextMemory, FileSnapshot, GlobalConfig, INSTRUCTION_FILES, MemoryType, ProjectSession,
+};
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
@@ -547,12 +549,7 @@ pub fn load_memories_context() -> Option<String> {
     let mut entries: Vec<_> = std::fs::read_dir(&dir)
         .ok()?
         .flatten()
-        .filter(|e| {
-            e.path()
-                .extension()
-                .map(|ext| ext == "md")
-                .unwrap_or(false)
-        })
+        .filter(|e| e.path().extension().map(|ext| ext == "md").unwrap_or(false))
         .collect();
 
     entries.sort_by_key(|e| e.file_name());
@@ -601,7 +598,7 @@ fn atomic_write<T: serde::Serialize>(target: &PathBuf, data: &T) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{with_cwd, tmp_dir};
+    use crate::test_utils::{tmp_dir, with_cwd};
 
     // ── Snapshot save/load round-trip ─────────────────────────────────
 
@@ -666,12 +663,17 @@ mod tests {
             let target = tmp.join("target.txt");
             std::fs::write(&target, "original").unwrap();
 
-            if save_snapshot("sess_undo", &FileSnapshot {
-                path: target.to_string_lossy().into(),
-                original_content: "original".into(),
-                timestamp: "t1".into(),
-                message_index: 0,
-            }).is_ok() {
+            if save_snapshot(
+                "sess_undo",
+                &FileSnapshot {
+                    path: target.to_string_lossy().into(),
+                    original_content: "original".into(),
+                    timestamp: "t1".into(),
+                    message_index: 0,
+                },
+            )
+            .is_ok()
+            {
                 std::fs::write(&target, "modified").unwrap();
                 if let Ok(restored) = undo_last_n("sess_undo", 1) {
                     if restored.len() == 1 {
@@ -692,17 +694,26 @@ mod tests {
             std::fs::write(&file_a, "a_orig").unwrap();
             std::fs::write(&file_b, "b_orig").unwrap();
 
-            let snap_ok = save_snapshot("sess_m", &FileSnapshot {
-                path: file_a.to_string_lossy().into(),
-                original_content: "a_orig".into(),
-                timestamp: "t1".into(),
-                message_index: 0,
-            }).is_ok() && save_snapshot("sess_m", &FileSnapshot {
-                path: file_b.to_string_lossy().into(),
-                original_content: "b_orig".into(),
-                timestamp: "t2".into(),
-                message_index: 1,
-            }).is_ok();
+            let snap_ok = save_snapshot(
+                "sess_m",
+                &FileSnapshot {
+                    path: file_a.to_string_lossy().into(),
+                    original_content: "a_orig".into(),
+                    timestamp: "t1".into(),
+                    message_index: 0,
+                },
+            )
+            .is_ok()
+                && save_snapshot(
+                    "sess_m",
+                    &FileSnapshot {
+                        path: file_b.to_string_lossy().into(),
+                        original_content: "b_orig".into(),
+                        timestamp: "t2".into(),
+                        message_index: 1,
+                    },
+                )
+                .is_ok();
 
             if snap_ok {
                 std::fs::write(&file_a, "a_new").unwrap();
@@ -726,12 +737,17 @@ mod tests {
             let target = tmp.join("f.txt");
             std::fs::write(&target, "orig").unwrap();
 
-            if save_snapshot("sess_o", &FileSnapshot {
-                path: target.to_string_lossy().into(),
-                original_content: "orig".into(),
-                timestamp: "t1".into(),
-                message_index: 0,
-            }).is_ok() {
+            if save_snapshot(
+                "sess_o",
+                &FileSnapshot {
+                    path: target.to_string_lossy().into(),
+                    original_content: "orig".into(),
+                    timestamp: "t1".into(),
+                    message_index: 0,
+                },
+            )
+            .is_ok()
+            {
                 std::fs::write(&target, "changed").unwrap();
                 if let Ok(restored) = undo_last_n("sess_o", 10) {
                     if restored.len() == 1 {
@@ -760,20 +776,23 @@ mod tests {
             assert_eq!(snapshot_count("none"), 0);
 
             for i in 0..3 {
-                save_snapshot("cnt", &FileSnapshot {
-                    path: format!("f{i}.txt"),
-                    original_content: "c".into(),
-                    timestamp: format!("t{i}"),
-                    message_index: i,
-                }).unwrap();
+                save_snapshot(
+                    "cnt",
+                    &FileSnapshot {
+                        path: format!("f{i}.txt"),
+                        original_content: "c".into(),
+                        timestamp: format!("t{i}"),
+                        message_index: i,
+                    },
+                )
+                .unwrap();
             }
             assert_eq!(snapshot_count("cnt"), 3);
 
             // undo_last_n with fake paths will error, just test count decrement logic
             let index_path = snapshots_dir("cnt").join("index.json");
-            let mut idx: Vec<FileSnapshot> = serde_json::from_str(
-                &std::fs::read_to_string(&index_path).unwrap()
-            ).unwrap();
+            let mut idx: Vec<FileSnapshot> =
+                serde_json::from_str(&std::fs::read_to_string(&index_path).unwrap()).unwrap();
             idx.pop();
             std::fs::write(&index_path, serde_json::to_string(&idx).unwrap()).unwrap();
             assert_eq!(snapshot_count("cnt"), 2);
@@ -1289,10 +1308,22 @@ content
 
     #[test]
     fn test_memory_type_json_serialization() {
-        assert_eq!(serde_json::to_string(&MemoryType::User).unwrap(), "\"user\"");
-        assert_eq!(serde_json::to_string(&MemoryType::Feedback).unwrap(), "\"feedback\"");
-        assert_eq!(serde_json::to_string(&MemoryType::Project).unwrap(), "\"project\"");
-        assert_eq!(serde_json::to_string(&MemoryType::Reference).unwrap(), "\"reference\"");
+        assert_eq!(
+            serde_json::to_string(&MemoryType::User).unwrap(),
+            "\"user\""
+        );
+        assert_eq!(
+            serde_json::to_string(&MemoryType::Feedback).unwrap(),
+            "\"feedback\""
+        );
+        assert_eq!(
+            serde_json::to_string(&MemoryType::Project).unwrap(),
+            "\"project\""
+        );
+        assert_eq!(
+            serde_json::to_string(&MemoryType::Reference).unwrap(),
+            "\"reference\""
+        );
     }
 
     #[test]
