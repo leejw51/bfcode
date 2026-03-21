@@ -89,7 +89,7 @@ pub fn save_session(session: &ProjectSession) -> Result<()> {
     // Ensure .bfcode/.gitignore excludes session data
     let gitignore = project_dir().join(".gitignore");
     if !gitignore.exists() {
-        std::fs::write(&gitignore, "sessions/\ncurrent\nplans/\n")?;
+        std::fs::write(&gitignore, "sessions/\ncurrent\nplans/\ncontext/\n")?;
     }
 
     // Write session file

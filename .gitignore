@@ -2,3 +2,5 @@ cli/test/
 .env
 opencode/
 .DS_Store
+cli/.bfcode/.gitignore
+.claude/settings.local.json
