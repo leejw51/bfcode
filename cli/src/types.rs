@@ -9,6 +9,8 @@ pub enum Provider {
     Grok,
     OpenAI,
     Anthropic,
+    /// OpenAI-compatible provider (Ollama, vLLM, LM Studio, Together, etc.)
+    Compatible,
 }
 
 impl Default for Provider {
@@ -23,6 +25,7 @@ impl std::fmt::Display for Provider {
             Provider::Grok => write!(f, "grok"),
             Provider::OpenAI => write!(f, "openai"),
             Provider::Anthropic => write!(f, "anthropic"),
+            Provider::Compatible => write!(f, "compatible"),
         }
     }
 }
@@ -63,8 +66,14 @@ pub fn provider_configs() -> Vec<ProviderConfig> {
     ]
 }
 
-/// Detect provider from model name
+/// Detect provider from model name.
+/// If model contains "/" (e.g., "ollama/llama3"), it's treated as compatible provider.
+/// Also checks BFCODE_API_URL env var for custom endpoint detection.
 pub fn detect_provider(model: &str) -> Provider {
+    // Explicit compatible provider prefix: "compatible/model-name"
+    if model.contains('/') {
+        return Provider::Compatible;
+    }
     if model.starts_with("claude") {
         Provider::Anthropic
     } else if model.starts_with("gpt-")
@@ -73,17 +82,46 @@ pub fn detect_provider(model: &str) -> Provider {
         || model.starts_with("o4")
     {
         Provider::OpenAI
+    } else if std::env::var("BFCODE_API_URL").is_ok() {
+        // If custom API URL is set, use compatible provider
+        Provider::Compatible
     } else {
         Provider::Grok
     }
 }
 
-/// Get provider config for a given provider
+/// Get provider config for a given provider.
+/// For Compatible provider, reads from BFCODE_API_URL, BFCODE_API_KEY, BFCODE_MODEL env vars.
 pub fn get_provider_config(provider: &Provider) -> anyhow::Result<ProviderConfig> {
+    if *provider == Provider::Compatible {
+        return Ok(get_compatible_provider_config());
+    }
     provider_configs()
         .into_iter()
         .find(|c| c.provider == *provider)
         .context(format!("No provider config found for {}", provider))
+}
+
+/// Build a ProviderConfig for an OpenAI-compatible endpoint from environment variables.
+///
+/// Env vars:
+///   BFCODE_API_URL   — Base URL (default: http://localhost:11434/v1/chat/completions)
+///   BFCODE_API_KEY   — API key (default: "ollama" for local)
+///   BFCODE_CONTEXT_LIMIT — Context window size (default: 131072)
+pub fn get_compatible_provider_config() -> ProviderConfig {
+    let api_url = std::env::var("BFCODE_API_URL")
+        .unwrap_or_else(|_| "http://localhost:11434/v1/chat/completions".into());
+    let context_limit = std::env::var("BFCODE_CONTEXT_LIMIT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(131_072);
+    ProviderConfig {
+        provider: Provider::Compatible,
+        api_key_env: "BFCODE_API_KEY".into(),
+        api_url,
+        default_model: "default".into(),
+        context_limit,
+    }
 }
 
 /// Get context limit for a model
@@ -976,8 +1014,59 @@ mod tests {
 
     #[test]
     fn test_detect_provider_unknown_defaults_to_grok() {
+        // Clear env to ensure no BFCODE_API_URL is set
+        unsafe { std::env::remove_var("BFCODE_API_URL"); }
         assert_eq!(detect_provider("some-custom-model"), Provider::Grok);
         assert_eq!(detect_provider("llama-3"), Provider::Grok);
+    }
+
+    // --- Compatible Provider Tests ---
+
+    #[test]
+    fn test_detect_provider_compatible_with_slash() {
+        assert_eq!(detect_provider("ollama/llama3"), Provider::Compatible);
+        assert_eq!(detect_provider("together/mixtral-8x7b"), Provider::Compatible);
+        assert_eq!(detect_provider("local/my-model"), Provider::Compatible);
+    }
+
+    #[test]
+    fn test_compatible_provider_config() {
+        let config = get_compatible_provider_config();
+        assert_eq!(config.provider, Provider::Compatible);
+        assert_eq!(config.api_key_env, "BFCODE_API_KEY");
+    }
+
+    #[test]
+    fn test_compatible_provider_config_custom_url() {
+        // Save and restore env
+        let orig = std::env::var("BFCODE_API_URL").ok();
+        unsafe { std::env::set_var("BFCODE_API_URL", "http://myserver:8080/v1/chat/completions"); }
+        let config = get_compatible_provider_config();
+        assert_eq!(config.api_url, "http://myserver:8080/v1/chat/completions");
+        // Restore
+        match orig {
+            Some(v) => unsafe { std::env::set_var("BFCODE_API_URL", v); },
+            None => unsafe { std::env::remove_var("BFCODE_API_URL"); },
+        }
+    }
+
+    #[test]
+    fn test_get_provider_config_compatible() {
+        let config = get_provider_config(&Provider::Compatible).unwrap();
+        assert_eq!(config.provider, Provider::Compatible);
+    }
+
+    #[test]
+    fn test_provider_display_compatible() {
+        assert_eq!(format!("{}", Provider::Compatible), "compatible");
+    }
+
+    #[test]
+    fn test_compatible_provider_serialization() {
+        let json = serde_json::to_string(&Provider::Compatible).unwrap();
+        assert_eq!(json, r#""compatible""#);
+        let parsed: Provider = serde_json::from_str(r#""compatible""#).unwrap();
+        assert_eq!(parsed, Provider::Compatible);
     }
 
     #[test]

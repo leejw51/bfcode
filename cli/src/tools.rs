@@ -10,8 +10,30 @@ use std::time::Duration;
 static SESSION_TODOS: std::sync::LazyLock<Mutex<std::collections::HashMap<String, Vec<TodoItem>>>> =
     std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
-/// Plan mode flag (true = plan mode active, write tools disabled)
-static PLAN_MODE: AtomicBool = AtomicBool::new(false);
+/// Agent mode — determines which tools are available
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AgentMode {
+    /// Full access to all tools (default)
+    Build,
+    /// Read-only mode — write/edit/bash disabled except .bfcode/plans/
+    Plan,
+    /// Exploration mode — only read/search tools allowed
+    Explore,
+}
+
+impl std::fmt::Display for AgentMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AgentMode::Build => write!(f, "build"),
+            AgentMode::Plan => write!(f, "plan"),
+            AgentMode::Explore => write!(f, "explore"),
+        }
+    }
+}
+
+/// Current agent mode (process-global)
+static AGENT_MODE: std::sync::LazyLock<Mutex<AgentMode>> =
+    std::sync::LazyLock::new(|| Mutex::new(AgentMode::Build));
 
 // Output limits (inspired by opencode)
 const MAX_OUTPUT_LINES: usize = 2000;
@@ -618,24 +640,48 @@ async fn execute_tool_inner(
     permissions: &Permissions,
     session_id: &str,
 ) -> String {
-    // Plan mode: block write tools (except plan_exit and writing to .bfcode/plans/)
-    if is_plan_mode() && matches!(name, "write" | "edit" | "apply_patch" | "multiedit" | "bash") {
-        // Allow writes to .bfcode/plans/ in plan mode
-        let is_plan_write = if matches!(name, "write" | "edit" | "multiedit") {
-            serde_json::from_str::<serde_json::Value>(arguments)
-                .ok()
-                .and_then(|v| v.get("path")?.as_str().map(|s| s.contains(".bfcode/plans/")))
-                .unwrap_or(false)
-        } else {
-            false
-        };
-        if !is_plan_write {
-            return format!(
-                "Error: Tool '{name}' is disabled in plan mode. \
-                 Use plan_exit to switch to build mode before making changes. \
-                 In plan mode, only read/search tools and writing to .bfcode/plans/ are allowed."
+    // Agent mode restrictions
+    let mode = current_agent_mode();
+    match mode {
+        AgentMode::Explore => {
+            // Explore mode: only read/search tools allowed
+            let allowed = matches!(
+                name,
+                "read" | "glob" | "grep" | "list_files" | "webfetch" | "websearch"
+                    | "memory_list" | "memory_search" | "pdf_read" | "todoread"
+                    | "todowrite" | "plan_enter" | "plan_exit"
             );
+            if !allowed {
+                return format!(
+                    "Error: Tool '{name}' is disabled in explore mode. \
+                     Only read/search tools are available. \
+                     Use plan_exit to switch to build mode."
+                );
+            }
         }
+        AgentMode::Plan => {
+            // Plan mode: block write tools except .bfcode/plans/
+            if matches!(name, "write" | "edit" | "apply_patch" | "multiedit" | "bash") {
+                let is_plan_write = if matches!(name, "write" | "edit" | "multiedit") {
+                    serde_json::from_str::<serde_json::Value>(arguments)
+                        .ok()
+                        .and_then(|v| {
+                            v.get("path")?.as_str().map(|s| s.contains(".bfcode/plans/"))
+                        })
+                        .unwrap_or(false)
+                } else {
+                    false
+                };
+                if !is_plan_write {
+                    return format!(
+                        "Error: Tool '{name}' is disabled in plan mode. \
+                         Use plan_exit to switch to build mode before making changes. \
+                         In plan mode, only read/search tools and writing to .bfcode/plans/ are allowed."
+                    );
+                }
+            }
+        }
+        AgentMode::Build => {} // all tools available
     }
 
     // Check protected files for write/edit/apply_patch/multiedit
@@ -2254,6 +2300,10 @@ async fn exec_task(
     let args: TaskToolArgs = serde_json::from_str(arguments)?;
     let agent_type = args.subagent_type.as_deref().unwrap_or("explore");
 
+    // Load agent definitions and find matching agent
+    let agents = crate::agent::load_agents();
+    let agent_def = crate::agent::find_agent(&agents, agent_type);
+
     eprintln!(
         "  {} Spawning {} subagent: {}",
         "+".green(),
@@ -2261,26 +2311,50 @@ async fn exec_task(
         args.description.dimmed()
     );
 
-    // Build a restricted tool set based on agent type
-    let restricted_tools: Vec<&str> = match agent_type {
-        "explore" => vec![
-            "read", "glob", "grep", "list_files", "webfetch", "websearch",
-            "memory_list", "memory_search", "pdf_read",
-        ],
-        "plan" => vec![
-            "read", "glob", "grep", "list_files", "webfetch", "websearch",
-            "memory_list", "memory_search", "pdf_read", "write",
-        ],
-        "build" => vec![
-            "read", "write", "edit", "bash", "glob", "grep", "list_files",
-            "apply_patch", "multiedit", "webfetch", "websearch",
-            "memory_save", "memory_list", "memory_search",
-        ],
-        _ => vec![
-            "read", "glob", "grep", "list_files", "webfetch", "websearch",
-            "memory_list", "memory_search",
-        ],
+    // Get tool list from agent definition, or fall back to defaults
+    let restricted_tools: Vec<String> = if let Some(def) = &agent_def {
+        if def.tools.is_empty() {
+            // Default tools for unknown agents
+            vec!["read", "glob", "grep", "list_files", "webfetch", "websearch",
+                 "memory_list", "memory_search"]
+                .into_iter().map(String::from).collect()
+        } else {
+            def.tools.clone()
+        }
+    } else {
+        // Fallback for unknown agent types
+        match agent_type {
+            "explore" => vec![
+                "read", "glob", "grep", "list_files", "webfetch", "websearch",
+                "memory_list", "memory_search", "pdf_read",
+            ],
+            "plan" => vec![
+                "read", "glob", "grep", "list_files", "webfetch", "websearch",
+                "memory_list", "memory_search", "pdf_read", "write",
+            ],
+            "build" => vec![
+                "read", "write", "edit", "bash", "glob", "grep", "list_files",
+                "apply_patch", "multiedit", "webfetch", "websearch",
+                "memory_save", "memory_list", "memory_search",
+            ],
+            _ => vec![
+                "read", "glob", "grep", "list_files", "webfetch", "websearch",
+                "memory_list", "memory_search",
+            ],
+        }
+        .into_iter()
+        .map(String::from)
+        .collect()
     };
+
+    // Get agent system prompt
+    let agent_prompt = agent_def
+        .as_ref()
+        .map(|d| d.prompt.as_str())
+        .unwrap_or("You are a subagent working on a specific task.");
+
+    // Get max rounds from agent definition
+    let max_rounds = agent_def.as_ref().map(|d| d.max_rounds).unwrap_or(15);
 
     // Create a child session
     let child_session_id = format!(
@@ -2290,13 +2364,12 @@ async fn exec_task(
 
     // Build system prompt for subagent
     let subagent_prompt = format!(
-        "You are a {} subagent working on a specific task.\n\
+        "{agent_prompt}\n\n\
          Your task: {}\n\n\
          Instructions:\n\
          {}\n\n\
          Available tools: {}\n\
          Complete the task and provide a clear summary of your findings/results.",
-        agent_type,
         args.description,
         args.prompt,
         restricted_tools.join(", ")
@@ -2306,7 +2379,7 @@ async fn exec_task(
     let all_tools = get_tool_definitions();
     let filtered_tools: Vec<ToolDefinition> = all_tools
         .into_iter()
-        .filter(|t| restricted_tools.contains(&t.function.name.as_str()))
+        .filter(|t| restricted_tools.contains(&t.function.name))
         .collect();
 
     // Create the subagent conversation
@@ -2315,12 +2388,16 @@ async fn exec_task(
         Message::user(&args.prompt),
     ];
 
-    // Load config and create client
-    let config = crate::persistence::load_config();
+    // Load config and create client (may use agent's model override)
+    let mut config = crate::persistence::load_config();
+    if let Some(ref def) = agent_def {
+        if let Some(ref model) = def.model {
+            config.model = model.clone();
+        }
+    }
     let client = crate::api::create_client(&config)?;
 
-    // Run the subagent loop (simplified — max 15 rounds)
-    let max_rounds = 15;
+    // Run the subagent loop
     let mut conversation = messages;
     let mut final_response = String::from("(no response from subagent)");
 
@@ -2340,7 +2417,7 @@ async fn exec_task(
 
             for tc in tool_calls {
                 // Only allow tools in the restricted set
-                if !restricted_tools.contains(&tc.function.name.as_str()) {
+                if !restricted_tools.contains(&tc.function.name) {
                     conversation.push(Message::tool_result(
                         &tc.id,
                         &format!("Error: Tool '{}' is not available for {} subagent.", tc.function.name, agent_type),
@@ -2453,51 +2530,82 @@ fn format_todos(items: &[TodoItem]) -> String {
 
 // --- Plan Mode Tools ---
 
+/// Get the current agent mode
+pub fn current_agent_mode() -> AgentMode {
+    *AGENT_MODE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Check if plan mode is currently active
 pub fn is_plan_mode() -> bool {
-    PLAN_MODE.load(Ordering::Relaxed)
+    current_agent_mode() == AgentMode::Plan
+}
+
+/// Set the agent mode
+pub fn set_agent_mode(mode: AgentMode) {
+    let mut m = AGENT_MODE.lock().unwrap_or_else(|e| e.into_inner());
+    *m = mode;
 }
 
 async fn exec_plan_enter(arguments: &str) -> Result<String> {
     let args: PlanEnterArgs = serde_json::from_str(arguments)?;
+    let mode = current_agent_mode();
 
-    if is_plan_mode() {
-        return Ok("Already in plan mode.".to_string());
+    // Determine target mode: plan_name starting with "explore:" → explore mode
+    let plan_name = args.plan_name.as_deref().unwrap_or("unnamed");
+    let target_mode = if plan_name.starts_with("explore:") {
+        AgentMode::Explore
+    } else {
+        AgentMode::Plan
+    };
+
+    if mode == target_mode {
+        return Ok(format!("Already in {} mode.", mode));
     }
 
-    PLAN_MODE.store(true, Ordering::Relaxed);
+    set_agent_mode(target_mode);
 
-    let plan_name = args.plan_name.as_deref().unwrap_or("unnamed");
     eprintln!(
-        "  {} Plan mode activated: {}",
+        "  {} {} mode activated: {}",
         "!".yellow().bold(),
+        target_mode,
         plan_name.cyan()
     );
 
-    Ok(format!(
-        "Plan mode activated (plan: '{plan_name}'). \
-         Write/edit/bash tools are now disabled. \
-         Use read/search tools to explore the codebase and design your plan. \
-         You can write plans to .bfcode/plans/. \
-         Call plan_exit when ready to implement."
-    ))
+    match target_mode {
+        AgentMode::Explore => Ok(format!(
+            "Explore mode activated ('{plan_name}'). \
+             Only read/search tools are available. \
+             Call plan_exit when ready to switch to build mode."
+        )),
+        AgentMode::Plan => Ok(format!(
+            "Plan mode activated (plan: '{plan_name}'). \
+             Write/edit/bash tools are now disabled. \
+             Use read/search tools to explore the codebase and design your plan. \
+             You can write plans to .bfcode/plans/. \
+             Call plan_exit when ready to implement."
+        )),
+        _ => unreachable!(),
+    }
 }
 
 async fn exec_plan_exit() -> Result<String> {
-    if !is_plan_mode() {
-        return Ok("Not currently in plan mode.".to_string());
+    let mode = current_agent_mode();
+    if mode == AgentMode::Build {
+        return Ok("Already in build mode.".to_string());
     }
 
-    PLAN_MODE.store(false, Ordering::Relaxed);
+    let prev = mode;
+    set_agent_mode(AgentMode::Build);
 
     eprintln!(
-        "  {} Build mode activated — all tools now available",
+        "  {} Build mode activated (was: {prev}) — all tools now available",
         "!".green().bold()
     );
 
-    Ok("Plan mode deactivated. Build mode active — all tools are now available. \
-        Proceed with implementation."
-        .to_string())
+    Ok(format!(
+        "{prev} mode deactivated. Build mode active — all tools are now available. \
+         Proceed with implementation."
+    ))
 }
 
 /// Simple shell escape for arguments
@@ -3376,6 +3484,9 @@ mod tests {
         assert!(defs.iter().any(|d| d.function.name == "memory_list"));
     }
 
+    // Lock for tests that modify global agent mode (prevents races between parallel tests)
+    static AGENT_MODE_LOCK: Mutex<()> = Mutex::new(());
+
     // --- Oneshot mode auto-approve ---
 
     fn permissions_with_auto_approve() -> Permissions {
@@ -3780,8 +3891,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_plan_enter_exit() {
-        // Ensure we start in build mode
-        PLAN_MODE.store(false, Ordering::Relaxed);
+        let _lock = AGENT_MODE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_agent_mode(AgentMode::Build);
         assert!(!is_plan_mode());
 
         // Enter plan mode
@@ -3801,13 +3912,13 @@ mod tests {
 
         // Double exit
         let result = exec_plan_exit().await.unwrap();
-        assert!(result.contains("Not currently in plan mode"));
+        assert!(result.contains("Already in build mode"));
     }
 
     #[tokio::test]
     async fn test_plan_mode_blocks_write_tools() {
-        // Ensure we start in build mode, then enter plan mode
-        PLAN_MODE.store(false, Ordering::Relaxed);
+        let _lock = AGENT_MODE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_agent_mode(AgentMode::Build);
         let _ = exec_plan_enter(r#"{"plan_name": "blocking-test"}"#).await;
         assert!(is_plan_mode());
 
@@ -3860,7 +3971,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_plan_mode_allows_plan_writes() {
-        PLAN_MODE.store(false, Ordering::Relaxed);
+        let _lock = AGENT_MODE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_agent_mode(AgentMode::Build);
         let _ = exec_plan_enter(r#"{"plan_name": "write-test"}"#).await;
 
         let dir = crate::test_utils::tmp_dir("plan_write");
@@ -3879,6 +3991,72 @@ mod tests {
         // Clean up
         let _ = exec_plan_exit().await;
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ==============================
+    // Explore Mode Tests
+    // ==============================
+
+    #[tokio::test]
+    async fn test_explore_mode_blocks_all_writes() {
+        let _lock = AGENT_MODE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_agent_mode(AgentMode::Build);
+        let _ = exec_plan_enter(r#"{"plan_name": "explore:research"}"#).await;
+        assert_eq!(current_agent_mode(), AgentMode::Explore);
+
+        let perms = permissions_with_auto_approve();
+
+        // Write blocked
+        let result = execute_tool("write", r#"{"path":"/tmp/x","content":"y"}"#, &perms, "t").await;
+        assert!(result.contains("disabled in explore mode"));
+
+        // Bash blocked
+        let result = execute_tool("bash", r#"{"command":"echo hi"}"#, &perms, "t").await;
+        assert!(result.contains("disabled in explore mode"));
+
+        // Read allowed
+        let dir = crate::test_utils::tmp_dir("explore_read");
+        let file = dir.join("r.txt");
+        std::fs::write(&file, "readable").unwrap();
+        let result = execute_tool("read", &format!(r#"{{"path":"{}"}}"#, file.display()), &perms, "t").await;
+        assert!(result.contains("readable"));
+
+        // Grep allowed (tool exists)
+        let result = execute_tool("grep", r#"{"pattern":"hello","path":"/tmp/nonexistent_dir_xyz"}"#, &perms, "t").await;
+        // Won't error from mode check — may error from no matches, but not "disabled"
+        assert!(!result.contains("disabled in explore mode"));
+
+        let _ = exec_plan_exit().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_agent_mode_transitions() {
+        let _lock = AGENT_MODE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_agent_mode(AgentMode::Build);
+
+        // Build → Plan
+        let _ = exec_plan_enter(r#"{"plan_name": "test"}"#).await;
+        assert_eq!(current_agent_mode(), AgentMode::Plan);
+
+        // Plan → Build
+        let _ = exec_plan_exit().await;
+        assert_eq!(current_agent_mode(), AgentMode::Build);
+
+        // Build → Explore
+        let _ = exec_plan_enter(r#"{"plan_name": "explore:test"}"#).await;
+        assert_eq!(current_agent_mode(), AgentMode::Explore);
+
+        // Explore → Build
+        let _ = exec_plan_exit().await;
+        assert_eq!(current_agent_mode(), AgentMode::Build);
+    }
+
+    #[test]
+    fn test_agent_mode_display() {
+        assert_eq!(format!("{}", AgentMode::Build), "build");
+        assert_eq!(format!("{}", AgentMode::Plan), "plan");
+        assert_eq!(format!("{}", AgentMode::Explore), "explore");
     }
 
     // ==============================

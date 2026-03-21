@@ -1,3 +1,4 @@
+mod agent;
 mod api;
 mod browser;
 mod config;
@@ -1577,6 +1578,7 @@ fn handle_command(
             println!("  {}      - show compaction summary", "/context".yellow());
             println!("  {}     - undo last N file changes", "/undo [n]".yellow());
             println!("  {} - send clipboard image", "/paste [msg]".yellow());
+            println!("  {}       - list available agents", "/agents".yellow());
             println!("  {}       - list available skills", "/skills".yellow());
             println!("  {} - activate a skill", "/skill <name>".yellow());
             println!("  {}    - manage cron jobs", "/cron [cmd]".yellow());
@@ -1797,6 +1799,17 @@ fn handle_command(
                 for (name, path) in &plans {
                     println!("  {} {}", name.cyan(), path.dimmed());
                 }
+            }
+        }
+        "/agents" => {
+            let agents = agent::load_agents();
+            if agents.is_empty() {
+                println!(
+                    "{}",
+                    "No agents found. Add .md files to ~/.bfcode/agents/".dimmed()
+                );
+            } else {
+                print!("{}", agent::format_agents_list(&agents));
             }
         }
         "/skills" => {

@@ -57,8 +57,16 @@ impl OpenAICompatibleClient {
     }
 
     pub fn from_config(config: &ProviderConfig) -> Result<Self> {
-        let api_key = std::env::var(&config.api_key_env)
-            .with_context(|| format!("{} environment variable not set", config.api_key_env))?;
+        let api_key = match std::env::var(&config.api_key_env) {
+            Ok(key) => key,
+            Err(_) if config.provider == Provider::Compatible => {
+                // Compatible providers (Ollama, etc.) may not need an API key
+                "no-key".to_string()
+            }
+            Err(_) => {
+                anyhow::bail!("{} environment variable not set", config.api_key_env);
+            }
+        };
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(300))
             .build()
@@ -78,8 +86,10 @@ impl OpenAICompatibleClient {
         temperature: f64,
         stream: bool,
     ) -> ChatRequest {
+        // Strip provider prefix for compatible models (e.g., "ollama/llama3" → "llama3")
+        let model_name = model.split('/').last().unwrap_or(model);
         ChatRequest {
-            model: model.into(),
+            model: model_name.into(),
             messages: messages.to_vec(),
             stream,
             temperature,
@@ -783,9 +793,9 @@ pub fn create_client(config: &GlobalConfig) -> Result<Box<dyn ChatClient>> {
     let provider_config = get_provider_config(&provider)?;
 
     match provider {
-        Provider::Grok | Provider::OpenAI => Ok(Box::new(OpenAICompatibleClient::from_config(
-            &provider_config,
-        )?)),
+        Provider::Grok | Provider::OpenAI | Provider::Compatible => {
+            Ok(Box::new(OpenAICompatibleClient::from_config(&provider_config)?))
+        }
         Provider::Anthropic => Ok(Box::new(AnthropicClient::from_config(&provider_config)?)),
     }
 }
