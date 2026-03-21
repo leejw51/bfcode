@@ -15,3 +15,4 @@ tokio = { version = "1", features = ["full"] }
 dirs = "6"
 colored = "3"
 chrono = "0.4"
+arboard = "3"
