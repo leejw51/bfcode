@@ -73,6 +73,12 @@ pub struct App {
     saved_input: String,
     /// Status message (shown briefly).
     status_message: Option<String>,
+    /// Whether the AI is currently streaming a response.
+    streaming: bool,
+    /// Streaming dots animation counter.
+    stream_tick: u8,
+    /// Whether to show the help overlay.
+    show_help: bool,
 }
 
 impl App {
@@ -94,6 +100,9 @@ impl App {
             history_index: -1,
             saved_input: String::new(),
             status_message: None,
+            streaming: false,
+            stream_tick: 0,
+            show_help: false,
         }
     }
 
@@ -154,6 +163,17 @@ impl App {
                 self.messages.clear();
                 self.scroll_offset = 0;
                 self.total_lines = 0;
+            }
+
+            // ----- Newline (Ctrl+Enter) -----
+            (KeyModifiers::CONTROL, KeyCode::Enter) => {
+                self.input.insert(self.cursor_pos, '\n');
+                self.cursor_pos += 1;
+            }
+
+            // ----- Help overlay -----
+            (KeyModifiers::CONTROL, KeyCode::Char('/')) => {
+                self.show_help = !self.show_help;
             }
 
             // ----- Submit -----
@@ -234,6 +254,17 @@ impl App {
         None
     }
 
+    pub fn set_streaming(&mut self, streaming: bool) {
+        self.streaming = streaming;
+        self.stream_tick = 0;
+    }
+
+    pub fn tick_stream(&mut self) {
+        if self.streaming {
+            self.stream_tick = (self.stream_tick + 1) % 4;
+        }
+    }
+
     // -- history helpers --
 
     fn browse_history_back(&mut self) {
@@ -300,19 +331,31 @@ pub fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -
 pub fn draw(f: &mut Frame, app: &App) {
     let size = f.area();
 
-    // Three vertical chunks: chat, status bar, input.
+    // Calculate input area height based on content
+    let input_inner_width = size.width.saturating_sub(4) as usize; // borders + prompt
+    let input_lines: usize = if input_inner_width == 0 {
+        1
+    } else {
+        app.input.split('\n').map(|line| {
+            let w = line.len();
+            if w == 0 { 1 } else { (w + input_inner_width - 1) / input_inner_width }
+        }).sum()
+    };
+    let input_height = (input_lines as u16 + 2).clamp(3, 10); // +2 for borders
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(5),    // chat area
-            Constraint::Length(1), // status bar
-            Constraint::Length(3), // input area
+            Constraint::Min(5),
+            Constraint::Length(1),
+            Constraint::Length(input_height),
         ])
         .split(size);
 
     draw_chat(f, app, chunks[0]);
     draw_status_bar(f, app, chunks[1]);
     draw_input(f, app, chunks[2]);
+    draw_help_overlay(f, app);
 }
 
 /// Render the chat history pane.
@@ -461,12 +504,16 @@ fn render_message<'a>(msg: &'a ChatMessage, _max_width: u16) -> Vec<Line<'a>> {
 
 /// Render the status bar.
 fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
-    let status_text = if let Some(ref msg) = app.status_message {
+    let status_text = if app.streaming {
+        let dots = ".".repeat(app.stream_tick as usize + 1);
+        format!(" {} Thinking{}", app.model, dots)
+    } else if let Some(ref msg) = app.status_message {
         msg.clone()
     } else {
+        let word_count: usize = app.messages.iter().map(|m| m.content.split_whitespace().count()).sum();
         format!(
-            " {} | Session: {} | Tokens: {} | Cost: ${:.4}",
-            app.model, app.session_id, app.tokens, app.cost,
+            " {} | Session: {} | Tokens: {} | Cost: ${:.4} | Words: {}",
+            app.model, app.session_id, app.tokens, app.cost, word_count,
         )
     };
 
@@ -484,26 +531,89 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
 
 /// Render the input area.
 fn draw_input(f: &mut Frame, app: &App, area: Rect) {
-    // Build the display text with a "> " prompt.
     let prompt = "> ";
-    let display = format!("{}{}", prompt, &app.input);
+    let inner_width = area.width.saturating_sub(2) as usize; // inside borders
+
+    // Build display lines from multiline input
+    let input_lines: Vec<&str> = app.input.split('\n').collect();
+    let mut display_lines: Vec<String> = Vec::new();
+    for (i, line) in input_lines.iter().enumerate() {
+        let pfx = if i == 0 { prompt } else { "  " }; // continuation indent
+        display_lines.push(format!("{}{}", pfx, line));
+    }
+    let display = display_lines.join("\n");
 
     let input_widget = Paragraph::new(display.as_str())
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" Input ")
+                .title(" Input (Enter=send, Ctrl+Enter=newline) ")
                 .border_style(Style::default().fg(Color::Cyan)),
         )
         .wrap(Wrap { trim: false });
 
     f.render_widget(input_widget, area);
 
-    // Place the cursor. The prompt is 2 chars wide ("| " border + "> ").
-    // Border left = 1, prompt = 2.
-    let cursor_x = area.x + 1 + prompt.len() as u16 + app.cursor_pos as u16;
-    let cursor_y = area.y + 1; // inside border
+    // Calculate cursor position for multiline
+    let mut bytes_before_cursor = 0;
+    let mut cursor_line = 0usize;
+    let mut cursor_col = 0usize;
+    for (i, line) in input_lines.iter().enumerate() {
+        let line_bytes = line.len();
+        if i > 0 {
+            bytes_before_cursor += 1; // account for '\n'
+        }
+        if app.cursor_pos <= bytes_before_cursor + line_bytes {
+            cursor_line = i;
+            cursor_col = app.cursor_pos - bytes_before_cursor;
+            break;
+        }
+        bytes_before_cursor += line_bytes;
+        cursor_line = i + 1;
+        cursor_col = 0;
+    }
+    let pfx_len = if cursor_line == 0 { prompt.len() } else { 2 };
+    let cursor_x = area.x + 1 + pfx_len as u16 + cursor_col as u16;
+    let cursor_y = area.y + 1 + cursor_line as u16;
     f.set_cursor_position((cursor_x, cursor_y));
+}
+
+/// Render the help overlay.
+fn draw_help_overlay(f: &mut Frame, app: &App) {
+    if !app.show_help {
+        return;
+    }
+    let area = f.area();
+    let popup_width = 50u16.min(area.width.saturating_sub(4));
+    let popup_height = 16u16.min(area.height.saturating_sub(4));
+    let x = (area.width.saturating_sub(popup_width)) / 2;
+    let y = (area.height.saturating_sub(popup_height)) / 2;
+    let popup_area = Rect::new(x, y, popup_width, popup_height);
+
+    // Clear background
+    let clear = Paragraph::new("")
+        .style(Style::default().bg(Color::Black));
+    f.render_widget(clear, popup_area);
+
+    let help_text = vec![
+        Line::from(Span::styled("Keyboard Shortcuts", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
+        Line::from(""),
+        Line::from(vec![Span::styled("Enter        ", Style::default().fg(Color::Yellow)), Span::raw("Send message")]),
+        Line::from(vec![Span::styled("Ctrl+Enter   ", Style::default().fg(Color::Yellow)), Span::raw("Insert newline")]),
+        Line::from(vec![Span::styled("Up/Down      ", Style::default().fg(Color::Yellow)), Span::raw("Browse history")]),
+        Line::from(vec![Span::styled("PageUp/Down  ", Style::default().fg(Color::Yellow)), Span::raw("Scroll chat")]),
+        Line::from(vec![Span::styled("Ctrl+L       ", Style::default().fg(Color::Yellow)), Span::raw("Clear chat")]),
+        Line::from(vec![Span::styled("Ctrl+/       ", Style::default().fg(Color::Yellow)), Span::raw("Toggle this help")]),
+        Line::from(vec![Span::styled("Ctrl+C / Esc ", Style::default().fg(Color::Yellow)), Span::raw("Quit")]),
+        Line::from(""),
+        Line::from(vec![Span::styled("/help        ", Style::default().fg(Color::Green)), Span::raw("Slash commands")]),
+        Line::from(vec![Span::styled("/quit        ", Style::default().fg(Color::Green)), Span::raw("Exit")]),
+    ];
+
+    let help = Paragraph::new(help_text)
+        .block(Block::default().borders(Borders::ALL).title(" Help ").border_style(Style::default().fg(Color::Cyan)))
+        .style(Style::default().bg(Color::Black));
+    f.render_widget(help, popup_area);
 }
 
 // ---------------------------------------------------------------------------

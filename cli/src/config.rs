@@ -982,20 +982,28 @@ key2: 'single quoted'
 
     #[test]
     fn test_apply_env_overrides() {
-        let mut config = serde_json::json!({ "model": "original" });
+        let mut config = serde_json::json!({
+            "model": "original",
+            "temperature": 1.0,
+            "provider": "anthropic"
+        });
 
-        // Temporarily set env var.
-        // SAFETY: This test is not run in parallel with other tests that
-        // depend on this env var.
+        // SAFETY: env var tests must not overlap.
         unsafe {
             std::env::set_var("BFCODE_MODEL", "from-env");
+            std::env::set_var("BFCODE_TEMPERATURE", "0.3");
+            std::env::set_var("BFCODE_PROVIDER", "openai");
         }
         apply_env_overrides(&mut config);
         assert_eq!(config["model"], "from-env");
+        assert_eq!(config["temperature"], 0.3);
+        assert_eq!(config["provider"], "openai");
 
         // Clean up.
         unsafe {
             std::env::remove_var("BFCODE_MODEL");
+            std::env::remove_var("BFCODE_TEMPERATURE");
+            std::env::remove_var("BFCODE_PROVIDER");
         }
     }
 
@@ -1248,32 +1256,6 @@ temperature: 0.5
         let migrated = migrate_config(&mut config).unwrap();
         assert!(migrated);
         assert_eq!(config["config_version"], 2);
-    }
-
-    #[test]
-    fn test_apply_env_overrides_model() {
-        let mut config = serde_json::json!({
-            "model": "original-model",
-            "temperature": 1.0,
-            "provider": "anthropic"
-        });
-
-        unsafe {
-            std::env::set_var("BFCODE_MODEL", "env-model");
-            std::env::set_var("BFCODE_TEMPERATURE", "0.3");
-            std::env::set_var("BFCODE_PROVIDER", "openai");
-        }
-        apply_env_overrides(&mut config);
-        assert_eq!(config["model"], "env-model");
-        assert_eq!(config["temperature"], 0.3);
-        assert_eq!(config["provider"], "openai");
-
-        // Clean up.
-        unsafe {
-            std::env::remove_var("BFCODE_MODEL");
-            std::env::remove_var("BFCODE_TEMPERATURE");
-            std::env::remove_var("BFCODE_PROVIDER");
-        }
     }
 
     #[test]
