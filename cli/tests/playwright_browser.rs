@@ -13,8 +13,8 @@
 //!
 //! All tests are #[ignore] by default so `cargo test` / `make test` skip them.
 
-use playwright::api::Viewport;
 use playwright::Playwright;
+use playwright::api::Viewport;
 
 /// Create a simple HTML test file and return its file:// URL
 fn create_test_html(name: &str, html: &str) -> String {
@@ -198,11 +198,9 @@ async fn test_eval_dom_manipulation() {
 
     page.goto_builder(&url).goto().await.unwrap();
 
-    page.eval::<()>(
-        "() => { document.getElementById('target').textContent = 'modified'; }",
-    )
-    .await
-    .unwrap();
+    page.eval::<()>("() => { document.getElementById('target').textContent = 'modified'; }")
+        .await
+        .unwrap();
 
     let text: String = page
         .eval("() => document.getElementById('target').textContent")
@@ -273,9 +271,7 @@ async fn test_click_link_navigation() {
 
     let source_url = create_test_html(
         "link_source",
-        &format!(
-            r#"<html><body><a id="link" href="{target_url}">Go to target</a></body></html>"#
-        ),
+        &format!(r#"<html><body><a id="link" href="{target_url}">Go to target</a></body></html>"#),
     );
 
     let (_pw, browser) = setup().await;
@@ -395,7 +391,10 @@ async fn test_screenshot_page() {
     let screenshot_path = std::env::temp_dir().join("bfcode_pw_screenshot.png");
     let screenshot_bytes = page.screenshot_builder().screenshot().await.unwrap();
 
-    assert!(!screenshot_bytes.is_empty(), "Screenshot should not be empty");
+    assert!(
+        !screenshot_bytes.is_empty(),
+        "Screenshot should not be empty"
+    );
     std::fs::write(&screenshot_path, &screenshot_bytes).unwrap();
     assert!(screenshot_path.exists());
 
@@ -642,7 +641,10 @@ async fn test_click_nonexistent_element_error() {
         .timeout(1000.0)
         .click()
         .await;
-    assert!(result.is_err(), "Expected error clicking nonexistent element");
+    assert!(
+        result.is_err(),
+        "Expected error clicking nonexistent element"
+    );
 
     browser.close().await.unwrap();
 }

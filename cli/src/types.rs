@@ -1015,7 +1015,9 @@ mod tests {
     #[test]
     fn test_detect_provider_unknown_defaults_to_grok() {
         // Clear env to ensure no BFCODE_API_URL is set
-        unsafe { std::env::remove_var("BFCODE_API_URL"); }
+        unsafe {
+            std::env::remove_var("BFCODE_API_URL");
+        }
         assert_eq!(detect_provider("some-custom-model"), Provider::Grok);
         assert_eq!(detect_provider("llama-3"), Provider::Grok);
     }
@@ -1025,7 +1027,10 @@ mod tests {
     #[test]
     fn test_detect_provider_compatible_with_slash() {
         assert_eq!(detect_provider("ollama/llama3"), Provider::Compatible);
-        assert_eq!(detect_provider("together/mixtral-8x7b"), Provider::Compatible);
+        assert_eq!(
+            detect_provider("together/mixtral-8x7b"),
+            Provider::Compatible
+        );
         assert_eq!(detect_provider("local/my-model"), Provider::Compatible);
     }
 
@@ -1040,13 +1045,19 @@ mod tests {
     fn test_compatible_provider_config_custom_url() {
         // Save and restore env
         let orig = std::env::var("BFCODE_API_URL").ok();
-        unsafe { std::env::set_var("BFCODE_API_URL", "http://myserver:8080/v1/chat/completions"); }
+        unsafe {
+            std::env::set_var("BFCODE_API_URL", "http://myserver:8080/v1/chat/completions");
+        }
         let config = get_compatible_provider_config();
         assert_eq!(config.api_url, "http://myserver:8080/v1/chat/completions");
         // Restore
         match orig {
-            Some(v) => unsafe { std::env::set_var("BFCODE_API_URL", v); },
-            None => unsafe { std::env::remove_var("BFCODE_API_URL"); },
+            Some(v) => unsafe {
+                std::env::set_var("BFCODE_API_URL", v);
+            },
+            None => unsafe {
+                std::env::remove_var("BFCODE_API_URL");
+            },
         }
     }
 

@@ -793,9 +793,9 @@ pub fn create_client(config: &GlobalConfig) -> Result<Box<dyn ChatClient>> {
     let provider_config = get_provider_config(&provider)?;
 
     match provider {
-        Provider::Grok | Provider::OpenAI | Provider::Compatible => {
-            Ok(Box::new(OpenAICompatibleClient::from_config(&provider_config)?))
-        }
+        Provider::Grok | Provider::OpenAI | Provider::Compatible => Ok(Box::new(
+            OpenAICompatibleClient::from_config(&provider_config)?,
+        )),
         Provider::Anthropic => Ok(Box::new(AnthropicClient::from_config(&provider_config)?)),
     }
 }

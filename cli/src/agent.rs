@@ -318,7 +318,12 @@ pub fn format_agents_list(agents: &[AgentDef]) -> String {
 
         output.push_str(&format!(
             "  {} {} {} — {}{} ({})\n    {}\n",
-            agent.name, mode_tag, tools_count, agent.description, model_tag, source,
+            agent.name,
+            mode_tag,
+            tools_count,
+            agent.description,
+            model_tag,
+            source,
             agent.prompt.lines().next().unwrap_or("")
         ));
     }

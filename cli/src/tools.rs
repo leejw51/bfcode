@@ -2,8 +2,8 @@ use crate::types::*;
 use anyhow::{Context, Result, bail, ensure};
 use colored::Colorize;
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// Session-scoped todo list (thread-safe, keyed by session_id)
@@ -647,9 +647,19 @@ async fn execute_tool_inner(
             // Explore mode: only read/search tools allowed
             let allowed = matches!(
                 name,
-                "read" | "glob" | "grep" | "list_files" | "webfetch" | "websearch"
-                    | "memory_list" | "memory_search" | "pdf_read" | "todoread"
-                    | "todowrite" | "plan_enter" | "plan_exit"
+                "read"
+                    | "glob"
+                    | "grep"
+                    | "list_files"
+                    | "webfetch"
+                    | "websearch"
+                    | "memory_list"
+                    | "memory_search"
+                    | "pdf_read"
+                    | "todoread"
+                    | "todowrite"
+                    | "plan_enter"
+                    | "plan_exit"
             );
             if !allowed {
                 return format!(
@@ -661,12 +671,17 @@ async fn execute_tool_inner(
         }
         AgentMode::Plan => {
             // Plan mode: block write tools except .bfcode/plans/
-            if matches!(name, "write" | "edit" | "apply_patch" | "multiedit" | "bash") {
+            if matches!(
+                name,
+                "write" | "edit" | "apply_patch" | "multiedit" | "bash"
+            ) {
                 let is_plan_write = if matches!(name, "write" | "edit" | "multiedit") {
                     serde_json::from_str::<serde_json::Value>(arguments)
                         .ok()
                         .and_then(|v| {
-                            v.get("path")?.as_str().map(|s| s.contains(".bfcode/plans/"))
+                            v.get("path")?
+                                .as_str()
+                                .map(|s| s.contains(".bfcode/plans/"))
                         })
                         .unwrap_or(false)
                 } else {
@@ -2241,10 +2256,17 @@ async fn exec_multiedit(arguments: &str, session_id: &str) -> Result<String> {
 const MAX_BATCH_CALLS: usize = 25;
 const DISALLOWED_BATCH_TOOLS: &[&str] = &["batch", "task"]; // prevent nesting
 
-async fn exec_batch(arguments: &str, permissions: &Permissions, session_id: &str) -> Result<String> {
+async fn exec_batch(
+    arguments: &str,
+    permissions: &Permissions,
+    session_id: &str,
+) -> Result<String> {
     let args: BatchArgs = serde_json::from_str(arguments)?;
 
-    ensure!(!args.tool_calls.is_empty(), "tool_calls array must not be empty");
+    ensure!(
+        !args.tool_calls.is_empty(),
+        "tool_calls array must not be empty"
+    );
 
     let call_count = args.tool_calls.len();
     if call_count > MAX_BATCH_CALLS {
@@ -2292,11 +2314,7 @@ async fn exec_batch(arguments: &str, permissions: &Permissions, session_id: &str
 
 // --- Task/Subagent Tool ---
 
-async fn exec_task(
-    arguments: &str,
-    permissions: &Permissions,
-    session_id: &str,
-) -> Result<String> {
+async fn exec_task(arguments: &str, permissions: &Permissions, session_id: &str) -> Result<String> {
     let args: TaskToolArgs = serde_json::from_str(arguments)?;
     let agent_type = args.subagent_type.as_deref().unwrap_or("explore");
 
@@ -2315,9 +2333,19 @@ async fn exec_task(
     let restricted_tools: Vec<String> = if let Some(def) = &agent_def {
         if def.tools.is_empty() {
             // Default tools for unknown agents
-            vec!["read", "glob", "grep", "list_files", "webfetch", "websearch",
-                 "memory_list", "memory_search"]
-                .into_iter().map(String::from).collect()
+            vec![
+                "read",
+                "glob",
+                "grep",
+                "list_files",
+                "webfetch",
+                "websearch",
+                "memory_list",
+                "memory_search",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect()
         } else {
             def.tools.clone()
         }
@@ -2325,21 +2353,53 @@ async fn exec_task(
         // Fallback for unknown agent types
         match agent_type {
             "explore" => vec![
-                "read", "glob", "grep", "list_files", "webfetch", "websearch",
-                "memory_list", "memory_search", "pdf_read",
+                "read",
+                "glob",
+                "grep",
+                "list_files",
+                "webfetch",
+                "websearch",
+                "memory_list",
+                "memory_search",
+                "pdf_read",
             ],
             "plan" => vec![
-                "read", "glob", "grep", "list_files", "webfetch", "websearch",
-                "memory_list", "memory_search", "pdf_read", "write",
+                "read",
+                "glob",
+                "grep",
+                "list_files",
+                "webfetch",
+                "websearch",
+                "memory_list",
+                "memory_search",
+                "pdf_read",
+                "write",
             ],
             "build" => vec![
-                "read", "write", "edit", "bash", "glob", "grep", "list_files",
-                "apply_patch", "multiedit", "webfetch", "websearch",
-                "memory_save", "memory_list", "memory_search",
+                "read",
+                "write",
+                "edit",
+                "bash",
+                "glob",
+                "grep",
+                "list_files",
+                "apply_patch",
+                "multiedit",
+                "webfetch",
+                "websearch",
+                "memory_save",
+                "memory_list",
+                "memory_search",
             ],
             _ => vec![
-                "read", "glob", "grep", "list_files", "webfetch", "websearch",
-                "memory_list", "memory_search",
+                "read",
+                "glob",
+                "grep",
+                "list_files",
+                "webfetch",
+                "websearch",
+                "memory_list",
+                "memory_search",
             ],
         }
         .into_iter()
@@ -2403,7 +2463,12 @@ async fn exec_task(
 
     for _round in 0..max_rounds {
         let response = client
-            .chat(&conversation, &filtered_tools, &config.model, config.temperature)
+            .chat(
+                &conversation,
+                &filtered_tools,
+                &config.model,
+                config.temperature,
+            )
             .await?;
 
         if response.choices.is_empty() {
@@ -2420,7 +2485,10 @@ async fn exec_task(
                 if !restricted_tools.contains(&tc.function.name) {
                     conversation.push(Message::tool_result(
                         &tc.id,
-                        &format!("Error: Tool '{}' is not available for {} subagent.", tc.function.name, agent_type),
+                        &format!(
+                            "Error: Tool '{}' is not available for {} subagent.",
+                            tc.function.name, agent_type
+                        ),
                     ));
                     continue;
                 }
@@ -2518,12 +2586,24 @@ fn format_todos(items: &[TodoItem]) -> String {
     }
 
     // Summary
-    let pending = items.iter().filter(|t| t.status == TodoStatus::Pending).count();
-    let in_progress = items.iter().filter(|t| t.status == TodoStatus::InProgress).count();
-    let completed = items.iter().filter(|t| t.status == TodoStatus::Completed).count();
+    let pending = items
+        .iter()
+        .filter(|t| t.status == TodoStatus::Pending)
+        .count();
+    let in_progress = items
+        .iter()
+        .filter(|t| t.status == TodoStatus::InProgress)
+        .count();
+    let completed = items
+        .iter()
+        .filter(|t| t.status == TodoStatus::Completed)
+        .count();
     output.push_str(&format!(
         "\nSummary: {} pending, {} in progress, {} completed (of {} total)",
-        pending, in_progress, completed, items.len()
+        pending,
+        in_progress,
+        completed,
+        items.len()
     ));
     output
 }
@@ -2690,7 +2770,11 @@ mod tests {
     fn test_tool_definitions_count() {
         let defs = get_tool_definitions();
         // Base: 28 tools, +1 if BRAVE/TAVILY key set, +1 if OPENAI key set
-        assert!(defs.len() >= 28 && defs.len() <= 30, "got {} tools", defs.len());
+        assert!(
+            defs.len() >= 28 && defs.len() <= 30,
+            "got {} tools",
+            defs.len()
+        );
     }
 
     #[test]
@@ -3584,7 +3668,9 @@ mod tests {
                 {"old_string": "foo", "new_string": "FOO"}
             ]
         });
-        let result = exec_multiedit(&args.to_string(), "test_session").await.unwrap();
+        let result = exec_multiedit(&args.to_string(), "test_session")
+            .await
+            .unwrap();
         assert!(result.contains("applied 2 edits"));
 
         let content = std::fs::read_to_string(&file).unwrap();
@@ -3609,7 +3695,9 @@ mod tests {
                 {"old_string": "xxx bbb", "new_string": "REPLACED"}
             ]
         });
-        let result = exec_multiedit(&args.to_string(), "test_session").await.unwrap();
+        let result = exec_multiedit(&args.to_string(), "test_session")
+            .await
+            .unwrap();
         assert!(result.contains("applied 2 edits"));
 
         let content = std::fs::read_to_string(&file).unwrap();
@@ -3622,7 +3710,12 @@ mod tests {
     async fn test_multiedit_empty_edits() {
         let result = exec_multiedit(r#"{"path": "/tmp/x", "edits": []}"#, "test").await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must not be empty"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("must not be empty")
+        );
     }
 
     #[tokio::test]
@@ -3679,7 +3772,12 @@ mod tests {
         });
         let result = exec_multiedit(&args.to_string(), "test").await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must be different"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("must be different")
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3716,7 +3814,12 @@ mod tests {
         let perms = permissions_with_auto_approve();
         let result = exec_batch(r#"{"tool_calls": []}"#, &perms, "test").await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must not be empty"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("must not be empty")
+        );
     }
 
     #[tokio::test]
@@ -3741,7 +3844,12 @@ mod tests {
         });
         let result = exec_batch(&args.to_string(), &perms, "test").await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("cannot be used inside batch"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("cannot be used inside batch")
+        );
     }
 
     #[tokio::test]
@@ -3754,7 +3862,12 @@ mod tests {
         });
         let result = exec_batch(&args.to_string(), &perms, "test").await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("cannot be used inside batch"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("cannot be used inside batch")
+        );
     }
 
     #[tokio::test]
@@ -3792,7 +3905,9 @@ mod tests {
             ]
         });
 
-        let result = exec_todowrite(&args.to_string(), &session_id).await.unwrap();
+        let result = exec_todowrite(&args.to_string(), &session_id)
+            .await
+            .unwrap();
         assert!(result.contains("3 items"));
 
         let read_result = exec_todoread(&session_id).await.unwrap();
@@ -3828,7 +3943,9 @@ mod tests {
                 {"content": "Task 2", "status": "pending"}
             ]
         });
-        exec_todowrite(&args1.to_string(), &session_id).await.unwrap();
+        exec_todowrite(&args1.to_string(), &session_id)
+            .await
+            .unwrap();
 
         // Replace with new list
         let args2 = serde_json::json!({
@@ -3838,7 +3955,9 @@ mod tests {
                 {"content": "Task 3", "status": "pending"}
             ]
         });
-        let result = exec_todowrite(&args2.to_string(), &session_id).await.unwrap();
+        let result = exec_todowrite(&args2.to_string(), &session_id)
+            .await
+            .unwrap();
         assert!(result.contains("3 items"));
 
         let read_result = exec_todoread(&session_id).await.unwrap();
@@ -3896,7 +4015,9 @@ mod tests {
         assert!(!is_plan_mode());
 
         // Enter plan mode
-        let result = exec_plan_enter(r#"{"plan_name": "test-plan"}"#).await.unwrap();
+        let result = exec_plan_enter(r#"{"plan_name": "test-plan"}"#)
+            .await
+            .unwrap();
         assert!(result.contains("Plan mode activated"));
         assert!(result.contains("test-plan"));
         assert!(is_plan_mode());
@@ -3930,7 +4051,8 @@ mod tests {
             r#"{"path": "/tmp/test.txt", "content": "blocked"}"#,
             &perms,
             "test",
-        ).await;
+        )
+        .await;
         assert!(result.contains("disabled in plan mode"));
 
         // Edit should be blocked
@@ -3939,16 +4061,12 @@ mod tests {
             r#"{"path": "/tmp/test.txt", "old_string": "a", "new_string": "b"}"#,
             &perms,
             "test",
-        ).await;
+        )
+        .await;
         assert!(result.contains("disabled in plan mode"));
 
         // Bash should be blocked
-        let result = execute_tool(
-            "bash",
-            r#"{"command": "echo hello"}"#,
-            &perms,
-            "test",
-        ).await;
+        let result = execute_tool("bash", r#"{"command": "echo hello"}"#, &perms, "test").await;
         assert!(result.contains("disabled in plan mode"));
 
         // Read should still work
@@ -3960,7 +4078,8 @@ mod tests {
             &format!(r#"{{"path": "{}"}}"#, file.display()),
             &perms,
             "test",
-        ).await;
+        )
+        .await;
         assert!(result.contains("can read this"));
 
         // Clean up: exit plan mode
@@ -3984,9 +4103,13 @@ mod tests {
         let args = serde_json::json!({
             "path": plan_file.display().to_string(),
             "content": "# My Plan\n\nStep 1..."
-        }).to_string();
+        })
+        .to_string();
         let result = execute_tool("write", &args, &perms, "test").await;
-        assert!(result.contains("Wrote"), "Expected write to succeed in plan dir, got: {result}");
+        assert!(
+            result.contains("Wrote"),
+            "Expected write to succeed in plan dir, got: {result}"
+        );
 
         // Clean up
         let _ = exec_plan_exit().await;
@@ -4018,11 +4141,23 @@ mod tests {
         let dir = crate::test_utils::tmp_dir("explore_read");
         let file = dir.join("r.txt");
         std::fs::write(&file, "readable").unwrap();
-        let result = execute_tool("read", &format!(r#"{{"path":"{}"}}"#, file.display()), &perms, "t").await;
+        let result = execute_tool(
+            "read",
+            &format!(r#"{{"path":"{}"}}"#, file.display()),
+            &perms,
+            "t",
+        )
+        .await;
         assert!(result.contains("readable"));
 
         // Grep allowed (tool exists)
-        let result = execute_tool("grep", r#"{"pattern":"hello","path":"/tmp/nonexistent_dir_xyz"}"#, &perms, "t").await;
+        let result = execute_tool(
+            "grep",
+            r#"{"pattern":"hello","path":"/tmp/nonexistent_dir_xyz"}"#,
+            &perms,
+            "t",
+        )
+        .await;
         // Won't error from mode check — may error from no matches, but not "disabled"
         assert!(!result.contains("disabled in explore mode"));
 
