@@ -29,15 +29,19 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             artifact: bfcode-linux-amd64
+            client_artifact: bfcode_client-linux-amd64
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             artifact: bfcode-linux-arm64
+            client_artifact: bfcode_client-linux-arm64
           - target: x86_64-apple-darwin
             os: macos-latest
             artifact: bfcode-darwin-amd64
+            client_artifact: bfcode_client-darwin-amd64
           - target: aarch64-apple-darwin
             os: macos-latest
             artifact: bfcode-darwin-arm64
+            client_artifact: bfcode_client-darwin-arm64
 
     steps:
       - uses: actions/checkout@v4
@@ -56,17 +60,25 @@ jobs:
         working-directory: cli
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Package binary
+      - name: Package binaries
         run: |
           mkdir -p dist
           cp cli/target/${{ matrix.target }}/release/bfcode dist/${{ matrix.artifact }}
           chmod +x dist/${{ matrix.artifact }}
+          cp cli/target/${{ matrix.target }}/release/bfcode-client dist/${{ matrix.client_artifact }}
+          chmod +x dist/${{ matrix.client_artifact }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
           path: dist/${{ matrix.artifact }}
+
+      - name: Upload client artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.client_artifact }}
+          path: dist/${{ matrix.client_artifact }}
 
   release:
     name: Create Release
