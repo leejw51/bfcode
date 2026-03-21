@@ -4,164 +4,84 @@
 
 <h1 align="center">bfcode</h1>
 
-A terminal-based AI coding assistant with multi-provider support. Think Claude Code / opencode, with support for Grok, OpenAI, and Anthropic APIs.
+An autonomous AI coding agent for the terminal. Reads, writes, and edits code across multi-round tool loops — with Grok, OpenAI, and Anthropic.
+
+## How It Works
+
+bfcode runs an autonomous agent loop: you describe a task, and it reads files, writes code, runs commands, searches the web, and iterates — up to 25 rounds — without waiting for input. It spawns subagents for parallel subtasks, falls back to alternate models on failure, and auto-compacts context to stay within limits.
 
 ## Features
 
-### Autonomous Agent
-- **25-round agent loop**: AI autonomously calls tools, reads results, and iterates up to 25 rounds without human input
-- **Subagents**: spawns isolated child agents (explore/plan/build) for complex subtasks with restricted tool sets
-- **Custom agents**: define agents via markdown files in `.bfcode/agents/` with model, tools, and system prompt
-- **Batch execution**: runs up to 25 tool calls in parallel for maximum throughput
-- **Model fallback chain**: auto-switches to backup model on rate limit, outage, or timeout with cooldown tracking
-- **Context window guard**: pre-flight checks prevent context overflow; hard floor at 16K tokens, preemptive compaction at 90%
-- **One-shot mode**: fully autonomous execution with auto-approved permissions (`--oneshot`)
+- **Autonomous agent loop** — 25-round tool execution, subagents (explore/plan/build), batch parallel calls, model fallback chain, context window guard, one-shot mode
+- **Multi-provider** — Grok, OpenAI, Anthropic with streaming, retry/backoff, cost tracking
+- **31 tools** — file read/write/edit/patch, bash, glob, grep, browser automation, web search, PDF, image generation, TTS, memory, tasks, plans
+- **TUI** — full-screen terminal interface with scrollable chat, input history, code highlighting, undo
+- **Custom agents** — define agents via `.bfcode/agents/*.md` with model, tools, and system prompt
+- **Skills** — reusable prompt templates with YAML frontmatter
+- **Sessions** — persistent conversations per project with export to markdown
+- **Infrastructure** — HTTP gateway, background daemon, cron scheduler, lifecycle hooks, diagnostics
 
-### Multi-Provider LLM
-- **Grok, OpenAI, Anthropic**: seamless provider switching with automatic detection from model name
-- **Streaming**: real-time SSE streaming with animated status indicators
-- **Retry with backoff**: automatic retries on rate limits and server errors
-- **Cost tracking**: per-token pricing for all supported models
-
-### Tools & Capabilities
-- **File operations**: read, write, edit, multi-edit, apply patches, glob, grep, list files
-- **Shell execution**: run bash commands with permission gates
-- **Browser automation**: headless Chrome/Chromium via CDP for navigation, screenshots, clicks, and JS evaluation
-- **Web search**: search the web using Brave or Tavily APIs
-- **PDF reading**: extract and analyze PDF content
-- **Image generation**: DALL-E integration for image creation
-- **Text-to-speech**: TTS synthesis
-
-### TUI & Interface
-- **Full-screen TUI**: scrollable chat, input history, status bar, code block highlighting
-- **Session management**: persistent conversations per project with export to markdown
-- **Context memory**: markdown-based memory system with TF-IDF search
-- **Permission system**: prompts before destructive operations (bash, write, edit)
-- **Project instructions**: auto-loads `AGENTS.md`, `CLAUDE.md`, or `BFCODE.md`
-- **Plans**: save and load markdown plans as context
-- **Skills**: reusable prompt templates with YAML frontmatter
-- **Undo**: revert file changes with per-file snapshots
-- **Image handling**: clipboard and file path support
-
-### Infrastructure
-- **Gateway server**: HTTP API for multi-user access with optional Tailscale integration
-- **Daemon mode**: background service with auto-respawn and systemd/launchd install
-- **Cron jobs**: schedule recurring tasks with persistent job storage
-- **Hooks/plugins**: lifecycle hooks for tool, message, and session events
-- **Doctor**: system diagnostics and health checks
-
-## Requirements
-
-- Rust (edition 2024)
-- An API key from one of the supported providers
-
-## Setup
-
-Set your API key as an environment variable:
+## Quick Start
 
 ```bash
-# Grok (default)
-export GROK_API_KEY=your-key
+export GROK_API_KEY=your-key      # or OPENAI_API_KEY or ANTHROPIC_API_KEY
 
-# OpenAI
-export OPENAI_API_KEY=your-key
-
-# Anthropic
-export ANTHROPIC_API_KEY=your-key
-```
-
-## Build & Install
-
-```bash
 cd cli
+make install                       # builds and installs to ~/.local/bin
 
-# Debug build
-make build
-
-# Release build + install to ~/.local/bin
-make install
+bfcode                             # start interactive session
+bfcode chat "fix the failing test" # one-liner
 ```
 
-## Usage
-
-```bash
-bfcode
-```
-
-### Interactive Commands
+## Commands
 
 | Command | Description |
 |---|---|
 | `/help` | Show help |
-| `/clear` | Clear current session |
-| `/compact` | Compact conversation history |
-| `/new` | Start a new session |
-| `/sessions` | List all sessions |
-| `/resume <id>` | Switch to a session |
 | `/model [name]` | Show or change model |
-| `/plan <name>` | Save a plan |
-| `/plans` | List saved plans |
-| `/skills` | List available skills |
+| `/new` | Start a new session |
+| `/sessions` | List sessions |
+| `/resume <id>` | Switch session |
+| `/compact` | Compact conversation |
 | `/skill <name>` | Activate a skill |
-| `/undo [count]` | Undo last file changes |
-| `/export [output]` | Export session as markdown |
-| `/context` | Show compaction summary |
-| `/cron` | Manage cron jobs |
+| `/undo [count]` | Undo file changes |
+| `/export [output]` | Export as markdown |
 | `/quit` | Exit |
 
-### CLI Subcommands
-
 ```bash
-bfcode gateway start [--listen <addr>] [--tailscale]   # Start HTTP API server
-bfcode gateway status [--url <url>]                     # Check gateway status
-bfcode gateway chat --url <url> <message>               # Remote chat
-
-bfcode daemon start|stop|status|install|uninstall       # Manage background daemon
-bfcode cron list|add|remove|enable|disable              # Manage cron jobs
-bfcode doctor                                           # Run system diagnostics
-bfcode config                                           # Show current config
-bfcode session list|new|resume|export                   # Manage sessions
-bfcode memory list|show|save|delete                     # Manage context memory
-bfcode skills list|show|import                          # Manage skills
+bfcode gateway start       # HTTP API server (multi-user, Tailscale support)
+bfcode daemon start        # background service with auto-respawn
+bfcode cron add 5m "task"  # scheduled recurring tasks
+bfcode doctor              # system diagnostics
 ```
 
 ## Configuration
 
-Config files are loaded with priority: env vars > project (`.bfcode/config.json`) > global (`~/.bfcode/config.json`) > defaults. Both JSON and YAML formats are supported.
-
-```bash
-bfcode cfg init [--format json|yaml] [--project]   # Initialize config
-bfcode cfg show                                     # Show merged config
-bfcode cfg validate                                 # Validate config files
-bfcode cfg sources                                  # Show config file locations
-```
+Priority: env vars > project `.bfcode/config.json` > global `~/.bfcode/config.json` > defaults. JSON and YAML supported.
 
 ## Project Structure
 
 ```
-cli/
-├── src/
-│   ├── main.rs          # CLI entry point, 25-round agent loop
-│   ├── api.rs           # Multi-provider API client with retry logic
-│   ├── tools.rs         # Tool definitions and execution (31 tools)
-│   ├── types.rs         # Request/response types
-│   ├── tui.rs           # Terminal user interface
-│   ├── agent.rs         # Custom agent definitions and subagent modes
-│   ├── browser.rs       # Headless Chrome automation (CDP)
-│   ├── config.rs        # Multi-source configuration
-│   ├── context.rs       # Context and memory management
-│   ├── cron.rs          # Cron job scheduler
-│   ├── daemon.rs        # Background daemon service
-│   ├── doctor.rs        # System diagnostics
-│   ├── fallback.rs      # Model fallback chain with cooldown tracking
-│   ├── gateway.rs       # HTTP gateway server
-│   ├── guard.rs         # Context window guard (overflow protection)
-│   ├── persistence.rs   # Session, config, and plan storage
-│   ├── plugin.rs        # Lifecycle hooks system
-│   ├── search.rs        # TF-IDF search engine
-│   └── skill.rs         # Skill template system
-├── Cargo.toml
-└── Makefile
+cli/src/
+├── main.rs        # Agent loop (25 rounds)
+├── api.rs         # Multi-provider API client
+├── tools.rs       # 31 tool definitions
+├── agent.rs       # Custom agents and subagent modes
+├── fallback.rs    # Model fallback chain
+├── guard.rs       # Context window guard
+├── tui.rs         # Terminal UI
+├── browser.rs     # Chrome automation (CDP)
+├── context.rs     # Context and memory
+├── config.rs      # Configuration
+├── gateway.rs     # HTTP gateway
+├── daemon.rs      # Background daemon
+├── cron.rs        # Cron scheduler
+├── plugin.rs      # Lifecycle hooks
+├── skill.rs       # Skill templates
+├── search.rs      # TF-IDF search
+├── persistence.rs # Session storage
+├── doctor.rs      # Diagnostics
+└── types.rs       # Types and models
 ```
 
 ## License
