@@ -158,18 +158,19 @@ jobs:
           xcrun stapler staple "$BFCODE" 2>/dev/null || echo "Staple skipped for CLI binary"
           xcrun stapler staple "$CLIENT" 2>/dev/null || echo "Staple skipped for CLI binary"
 
-      # ── Package: sign first, then zip ─────────────────────────────────
+      # ── Package: sign first, then zip (only zips are kept) ────────────
       - name: Package binaries as zip
         run: |
-          mkdir -p dist
-          cp cli/target/${{ matrix.target }}/release/bfcode dist/${{ matrix.artifact }}
-          chmod +x dist/${{ matrix.artifact }}
-          cp cli/target/${{ matrix.target }}/release/bfcode-client dist/${{ matrix.client_artifact }}
-          chmod +x dist/${{ matrix.client_artifact }}
+          mkdir -p dist/staging
+          cp cli/target/${{ matrix.target }}/release/bfcode dist/staging/${{ matrix.artifact }}
+          chmod +x dist/staging/${{ matrix.artifact }}
+          cp cli/target/${{ matrix.target }}/release/bfcode-client dist/staging/${{ matrix.client_artifact }}
+          chmod +x dist/staging/${{ matrix.client_artifact }}
 
-          cd dist
-          zip "${{ matrix.artifact }}.zip" "${{ matrix.artifact }}"
-          zip "${{ matrix.client_artifact }}.zip" "${{ matrix.client_artifact }}"
+          cd dist/staging
+          zip "../${{ matrix.artifact }}.zip" "${{ matrix.artifact }}"
+          zip "../${{ matrix.client_artifact }}.zip" "${{ matrix.client_artifact }}"
+          rm -rf ../staging
 
       - name: Upload artifact (zip)
         uses: actions/upload-artifact@v4
