@@ -1269,4 +1269,221 @@ mod tests {
     fn test_estimate_conversation_tokens_empty() {
         assert_eq!(estimate_conversation_tokens(&[]), 0);
     }
+
+    // ========== markdown writing & descriptive title tests ==========
+    // Verify that AI-generated context markdown has descriptive titles
+    // so an AI can pick the right file during processing.
+
+    #[test]
+    fn test_transcript_markdown_has_descriptive_title() {
+        let session = make_rich_session();
+        let md = format_transcript(&session);
+
+        // The top-level header must include the session title, not a generic label
+        let first_line = md.lines().next().unwrap();
+        assert!(
+            first_line.starts_with("# Session:"),
+            "Transcript must start with a descriptive '# Session:' header"
+        );
+        assert!(
+            first_line.contains("Refactor auth module"),
+            "Header should contain the session title so AI can identify it: {first_line}"
+        );
+    }
+
+    #[test]
+    fn test_compaction_markdown_sections_are_descriptive() {
+        let session = make_rich_session();
+        let summary = build_compaction_summary(&session);
+
+        // Each section header should be a well-known descriptive keyword
+        let expected_sections = [
+            "## Goal",
+            "## Instructions",
+            "## Discoveries",
+            "## Accomplished",
+            "## Relevant Files",
+        ];
+        for section in &expected_sections {
+            assert!(
+                summary.contains(section),
+                "Compaction summary missing descriptive section: {section}"
+            );
+        }
+
+        // Goal section should contain actual user intent, not a placeholder
+        let goal_section: &str = summary.split("## Instructions").next().unwrap();
+        assert!(
+            goal_section.contains("refactor the auth module"),
+            "Goal section should reflect the user's actual request for AI discoverability"
+        );
+    }
+
+    #[test]
+    fn test_environment_markdown_has_descriptive_title() {
+        let ctx = build_environment_context();
+
+        let first_line = ctx.lines().next().unwrap();
+        assert_eq!(
+            first_line, "# Environment",
+            "Environment context must have a clear descriptive title"
+        );
+
+        // Sub-sections should use descriptive bold labels
+        assert!(ctx.contains("**Working directory:**"));
+        assert!(ctx.contains("**Platform:**"));
+        assert!(ctx.contains("**Date:**"));
+    }
+
+    #[test]
+    fn test_context_files_carry_descriptive_comment_tags() {
+        // When loaded, each context file is wrapped with <!-- context: {name} -->
+        // so the AI can identify which file contributed which content.
+        let tmp = TempDir::new("ctx_tags");
+        let ctx_dir = tmp.path().join(".bfcode").join("context");
+        fs::create_dir_all(&ctx_dir).unwrap();
+
+        fs::write(
+            ctx_dir.join("auth-refactor-plan.md"),
+            "# Auth Refactor Plan\n\nMigrate from session to JWT.",
+        )
+        .unwrap();
+        fs::write(
+            ctx_dir.join("environment.md"),
+            "# Environment\n\n- Platform: darwin",
+        )
+        .unwrap();
+
+        with_cwd(tmp.path(), || {
+            let loaded = load_context_files().unwrap();
+
+            // Each file should be tagged with its stem so AI knows the source
+            assert!(
+                loaded.contains("<!-- context: auth-refactor-plan -->"),
+                "Context tag should use the descriptive filename stem"
+            );
+            assert!(
+                loaded.contains("<!-- context: environment -->"),
+                "Context tag should use the descriptive filename stem"
+            );
+        });
+    }
+
+    #[test]
+    fn test_saved_compaction_filename_contains_session_id() {
+        let tmp = TempDir::new("compaction_name");
+
+        with_cwd(tmp.path(), || {
+            let session = make_rich_session();
+            let (path, _content) = save_compaction_summary(&session).unwrap();
+
+            let filename = path.file_name().unwrap().to_string_lossy();
+            // Filename should be "compaction-{session_id}.md" — descriptive prefix + unique id
+            assert!(
+                filename.starts_with("compaction-"),
+                "Compaction file should have a descriptive 'compaction-' prefix: {filename}"
+            );
+            assert!(
+                filename.ends_with(".md"),
+                "Compaction file must be .md so it is picked up by load_context_files"
+            );
+            assert!(
+                filename.contains(&session.id),
+                "Filename should embed session id for traceability"
+            );
+        });
+    }
+
+    #[test]
+    fn test_markdown_written_by_ai_is_self_describing() {
+        // Simulate AI writing a context markdown file with a descriptive title,
+        // then verify load_context_files can pick it up and the title is preserved.
+        let tmp = TempDir::new("ai_md_write");
+        let ctx_dir = tmp.path().join(".bfcode").join("context");
+        fs::create_dir_all(&ctx_dir).unwrap();
+
+        // AI writes a markdown file with a descriptive name and header
+        let ai_content = "\
+# Bug Fix: Login Timeout on Slow Networks
+
+## Summary
+The login handler was not respecting the configured timeout value.
+
+## Root Cause
+`reqwest::Client` was built without `.timeout()` in the auth module.
+
+## Fix Applied
+Added `.timeout(Duration::from_secs(config.login_timeout))` to the client builder.
+
+## Files Changed
+- `src/auth/client.rs`
+- `src/config.rs`
+";
+        fs::write(ctx_dir.join("bugfix-login-timeout.md"), ai_content).unwrap();
+
+        with_cwd(tmp.path(), || {
+            let loaded = load_context_files().unwrap();
+
+            // The descriptive filename is used as the context tag
+            assert!(loaded.contains("<!-- context: bugfix-login-timeout -->"));
+
+            // The descriptive header is preserved so AI can scan titles
+            assert!(loaded.contains("# Bug Fix: Login Timeout on Slow Networks"));
+
+            // Structured sections are preserved for AI parsing
+            assert!(loaded.contains("## Summary"));
+            assert!(loaded.contains("## Root Cause"));
+            assert!(loaded.contains("## Fix Applied"));
+            assert!(loaded.contains("## Files Changed"));
+
+            // Specific content is accessible
+            assert!(loaded.contains("src/auth/client.rs"));
+        });
+    }
+
+    #[test]
+    fn test_multiple_ai_markdown_files_distinguishable_by_title() {
+        // AI writes multiple context files — each should be identifiable by its title
+        let tmp = TempDir::new("ai_multi_md");
+        let ctx_dir = tmp.path().join(".bfcode").join("context");
+        fs::create_dir_all(&ctx_dir).unwrap();
+
+        let files = vec![
+            (
+                "api-rate-limiting.md",
+                "# API Rate Limiting Design\n\nToken bucket at 100 req/s.",
+            ),
+            (
+                "database-migration-v2.md",
+                "# Database Migration v2\n\nAdd `expires_at` column to sessions table.",
+            ),
+            (
+                "performance-profiling.md",
+                "# Performance Profiling Results\n\nP99 latency dropped from 200ms to 45ms.",
+            ),
+        ];
+
+        for (name, content) in &files {
+            fs::write(ctx_dir.join(name), content).unwrap();
+        }
+
+        with_cwd(tmp.path(), || {
+            let loaded = load_context_files().unwrap();
+
+            // All three files should be loaded with distinct, descriptive context tags
+            assert!(loaded.contains("<!-- context: api-rate-limiting -->"));
+            assert!(loaded.contains("<!-- context: database-migration-v2 -->"));
+            assert!(loaded.contains("<!-- context: performance-profiling -->"));
+
+            // Each title is unique and descriptive — AI can pick the right one
+            assert!(loaded.contains("# API Rate Limiting Design"));
+            assert!(loaded.contains("# Database Migration v2"));
+            assert!(loaded.contains("# Performance Profiling Results"));
+
+            // Content from each file is present
+            assert!(loaded.contains("Token bucket"));
+            assert!(loaded.contains("expires_at"));
+            assert!(loaded.contains("P99 latency"));
+        });
+    }
 }
