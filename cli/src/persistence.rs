@@ -147,6 +147,62 @@ pub fn list_sessions() -> Vec<(String, String, String, usize)> {
     sessions
 }
 
+/// Fork a session at a given user-message index.
+///
+/// If `message_index` is `None`, the entire conversation is copied.
+/// Returns the newly created forked session.
+pub fn fork_session(id: &str, message_index: Option<usize>) -> Result<ProjectSession> {
+    let path = session_file(id);
+    if !path.exists() {
+        anyhow::bail!("Session '{id}' not found");
+    }
+
+    let data = std::fs::read_to_string(&path).context("Failed to read session file")?;
+    let parent: ProjectSession =
+        serde_json::from_str(&data).context("Failed to parse session file")?;
+
+    // Count existing forks to generate a unique fork number
+    let fork_count = list_session_children(id).len();
+
+    let forked = parent.fork(message_index, fork_count);
+    save_session(&forked)?;
+    Ok(forked)
+}
+
+/// List child sessions (forks) of a given parent session ID.
+pub fn list_session_children(parent_id: &str) -> Vec<(String, String, String, usize)> {
+    let dir = sessions_dir();
+    if !dir.exists() {
+        return vec![];
+    }
+
+    let mut children: Vec<(String, String, String, usize)> = vec![];
+
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().map(|e| e == "json").unwrap_or(false) {
+                if let Ok(data) = std::fs::read_to_string(&path) {
+                    if let Ok(session) = serde_json::from_str::<ProjectSession>(&data) {
+                        if session.parent_id.as_deref() == Some(parent_id) {
+                            let msg_count = session.conversation.len();
+                            children.push((
+                                session.id,
+                                session.title,
+                                session.updated_at,
+                                msg_count,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    children.sort_by(|a, b| b.2.cmp(&a.2));
+    children
+}
+
 /// Switch to a specific session by ID
 pub fn switch_session(id: &str) -> Option<ProjectSession> {
     let path = session_file(id);
@@ -1332,5 +1388,222 @@ content
         assert_eq!(u, MemoryType::User);
         let f: MemoryType = serde_json::from_str("\"feedback\"").unwrap();
         assert_eq!(f, MemoryType::Feedback);
+    }
+
+    // ── Session forking ────────────────────────────────────────────────
+
+    use crate::types::Message;
+
+    #[test]
+    fn test_fork_session_full_copy() {
+        let tmp = tmp_dir("fork_full");
+        with_cwd(&tmp, || {
+            // Create a session with some messages
+            let mut session = ProjectSession::new();
+            session.title = "Original session".into();
+            session.conversation.push(Message::system("sys prompt"));
+            session.conversation.push(Message::user("hello"));
+            session
+                .conversation
+                .push(Message::assistant_text("hi there"));
+            session.conversation.push(Message::user("do something"));
+            save_session(&session).unwrap();
+
+            // Fork the entire session
+            let forked = fork_session(&session.id, None).unwrap();
+
+            assert_ne!(forked.id, session.id);
+            assert_eq!(forked.parent_id, Some(session.id.clone()));
+            assert_eq!(forked.title, "Original session (fork #1)");
+            assert_eq!(forked.conversation.len(), 4);
+            assert_eq!(
+                forked.conversation[1].content.as_deref(),
+                Some("hello")
+            );
+
+            // Verify the forked session was saved to disk
+            let loaded = switch_session(&forked.id).unwrap();
+            assert_eq!(loaded.id, forked.id);
+            assert_eq!(loaded.parent_id, Some(session.id.clone()));
+            assert_eq!(loaded.conversation.len(), 4);
+        });
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_fork_session_at_message_index() {
+        let tmp = tmp_dir("fork_at_idx");
+        with_cwd(&tmp, || {
+            let mut session = ProjectSession::new();
+            session.title = "Test session".into();
+            session.conversation.push(Message::system("sys"));
+            session.conversation.push(Message::user("msg1"));
+            session
+                .conversation
+                .push(Message::assistant_text("reply1"));
+            session.conversation.push(Message::user("msg2"));
+            session
+                .conversation
+                .push(Message::assistant_text("reply2"));
+            save_session(&session).unwrap();
+
+            // Fork at index 3 — copies messages [0..3]
+            let forked = fork_session(&session.id, Some(3)).unwrap();
+
+            assert_eq!(forked.conversation.len(), 3);
+            assert_eq!(forked.conversation[0].content.as_deref(), Some("sys"));
+            assert_eq!(forked.conversation[1].content.as_deref(), Some("msg1"));
+            assert_eq!(
+                forked.conversation[2].content.as_deref(),
+                Some("reply1")
+            );
+            assert_eq!(forked.parent_id, Some(session.id.clone()));
+        });
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_fork_session_not_found() {
+        let tmp = tmp_dir("fork_not_found");
+        with_cwd(&tmp, || {
+            let result = fork_session("nonexistent_session", None);
+            assert!(result.is_err());
+        });
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_fork_title_generation() {
+        assert_eq!(
+            ProjectSession::fork_title("My Session", 0),
+            "My Session (fork #1)"
+        );
+        assert_eq!(
+            ProjectSession::fork_title("My Session", 2),
+            "My Session (fork #3)"
+        );
+        // Re-forking strips existing suffix
+        assert_eq!(
+            ProjectSession::fork_title("My Session (fork #2)", 0),
+            "My Session (fork #1)"
+        );
+    }
+
+    #[test]
+    fn test_fork_increments_fork_number() {
+        let tmp = tmp_dir("fork_increment");
+        with_cwd(&tmp, || {
+            let mut session = ProjectSession::new();
+            session.title = "Base".into();
+            session.conversation.push(Message::user("hi"));
+            save_session(&session).unwrap();
+
+            // First fork
+            let fork1 = fork_session(&session.id, None).unwrap();
+            assert_eq!(fork1.title, "Base (fork #1)");
+
+            // Need a small delay so the second fork gets a different timestamp ID
+            std::thread::sleep(std::time::Duration::from_secs(1));
+
+            // Second fork
+            let fork2 = fork_session(&session.id, None).unwrap();
+            assert_eq!(fork2.title, "Base (fork #2)");
+        });
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_list_session_children() {
+        let tmp = tmp_dir("fork_children");
+        with_cwd(&tmp, || {
+            let mut session = ProjectSession::new();
+            session.title = "Parent".into();
+            session.conversation.push(Message::user("hi"));
+            save_session(&session).unwrap();
+
+            // No children yet
+            let children = list_session_children(&session.id);
+            assert!(children.is_empty());
+
+            // Create a fork
+            let fork1 = fork_session(&session.id, None).unwrap();
+
+            // Need a small delay so the second fork gets a different timestamp ID
+            std::thread::sleep(std::time::Duration::from_secs(1));
+
+            let fork2 = fork_session(&session.id, None).unwrap();
+
+            let children = list_session_children(&session.id);
+            assert_eq!(children.len(), 2);
+
+            // Children should include both fork IDs
+            let child_ids: Vec<&str> = children.iter().map(|c| c.0.as_str()).collect();
+            assert!(child_ids.contains(&fork1.id.as_str()));
+            assert!(child_ids.contains(&fork2.id.as_str()));
+        });
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_fork_preserves_parent_id_on_disk() {
+        let tmp = tmp_dir("fork_parent_disk");
+        with_cwd(&tmp, || {
+            let mut session = ProjectSession::new();
+            session.conversation.push(Message::user("test"));
+            save_session(&session).unwrap();
+
+            let forked = fork_session(&session.id, None).unwrap();
+
+            // Read raw JSON to verify parent_id field is persisted
+            let raw = std::fs::read_to_string(session_file(&forked.id)).unwrap();
+            let json: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            assert_eq!(json["parent_id"].as_str(), Some(session.id.as_str()));
+        });
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_fork_with_index_beyond_conversation_length() {
+        let tmp = tmp_dir("fork_idx_beyond");
+        with_cwd(&tmp, || {
+            let mut session = ProjectSession::new();
+            session.conversation.push(Message::user("only msg"));
+            save_session(&session).unwrap();
+
+            // Fork at index 100 — should clamp to conversation length
+            let forked = fork_session(&session.id, Some(100)).unwrap();
+            assert_eq!(forked.conversation.len(), 1);
+        });
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_fork_at_zero_creates_empty_conversation() {
+        let tmp = tmp_dir("fork_at_zero");
+        with_cwd(&tmp, || {
+            let mut session = ProjectSession::new();
+            session
+                .conversation
+                .push(Message::user("should not appear"));
+            save_session(&session).unwrap();
+
+            let forked = fork_session(&session.id, Some(0)).unwrap();
+            assert!(forked.conversation.is_empty());
+            assert_eq!(forked.parent_id, Some(session.id.clone()));
+        });
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_original_session_parent_id_is_none() {
+        let session = ProjectSession::new();
+        assert!(session.parent_id.is_none());
+    }
+
+    #[test]
+    fn test_fork_session_parent_id_not_serialized_when_none() {
+        let session = ProjectSession::new();
+        let json = serde_json::to_string(&session).unwrap();
+        assert!(!json.contains("parent_id"));
     }
 }

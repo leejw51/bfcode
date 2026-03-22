@@ -617,6 +617,9 @@ pub struct ProjectSession {
     pub total_tokens: u64,
     pub created_at: String,
     pub updated_at: String,
+    /// Parent session ID — set when this session was forked from another
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
 }
 
 impl ProjectSession {
@@ -630,7 +633,66 @@ impl ProjectSession {
             total_tokens: 0,
             created_at: now.clone(),
             updated_at: now,
+            parent_id: None,
         }
+    }
+
+    /// Fork this session at a given message index.
+    ///
+    /// Creates a new session containing messages `[0..message_index]` from the
+    /// original conversation.  If `message_index` is `None`, the entire
+    /// conversation is copied.
+    ///
+    /// The fork title follows the pattern `"<title> (fork #N)"` where N
+    /// increments if the title already contains a fork suffix.
+    pub fn fork(&self, message_index: Option<usize>, fork_count: usize) -> Self {
+        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        let id = format!(
+            "{}_f{}",
+            chrono::Local::now().format("%Y%m%d_%H%M%S"),
+            fork_count + 1
+        );
+
+        // Build fork title
+        let title = Self::fork_title(&self.title, fork_count);
+
+        // Copy messages up to the fork point
+        let end = message_index.unwrap_or(self.conversation.len());
+        let conversation: Vec<Message> = self.conversation[..end.min(self.conversation.len())]
+            .to_vec();
+
+        // Rough token estimate (~4 chars per token, matching context.rs heuristic)
+        let total_tokens = conversation
+            .iter()
+            .map(|m| {
+                let text_len = m.content.as_deref().unwrap_or("").len() as u64;
+                text_len / 4 + 4 // 4 chars/token + per-message overhead
+            })
+            .sum::<u64>();
+
+        Self {
+            id,
+            title,
+            conversation,
+            total_tokens,
+            created_at: now.clone(),
+            updated_at: now,
+            parent_id: Some(self.id.clone()),
+        }
+    }
+
+    /// Generate a fork title.
+    ///
+    /// `"My Session"` → `"My Session (fork #1)"`
+    /// `"My Session (fork #2)"` → `"My Session (fork #3)"`
+    pub(crate) fn fork_title(title: &str, fork_count: usize) -> String {
+        // Strip existing fork suffix if present
+        let base = if let Some(pos) = title.rfind(" (fork #") {
+            &title[..pos]
+        } else {
+            title
+        };
+        format!("{} (fork #{})", base, fork_count + 1)
     }
 }
 

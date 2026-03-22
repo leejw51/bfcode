@@ -178,6 +178,19 @@ enum SessionCommands {
         #[arg(short, long)]
         output: Option<String>,
     },
+    /// Fork a session at a specific message index for parallel exploration
+    Fork {
+        /// Session ID to fork (defaults to current)
+        id: Option<String>,
+        /// Message index to fork at (copies messages before this index; omit to copy all)
+        #[arg(short, long)]
+        message: Option<usize>,
+    },
+    /// List child sessions (forks) of a session
+    Children {
+        /// Session ID (defaults to current)
+        id: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -686,6 +699,68 @@ fn run_session_command(cmd: SessionCommands) -> Result<()> {
                 "{}",
                 format!("Transcript exported: {}", path.display()).green()
             );
+            Ok(())
+        }
+        SessionCommands::Fork { id, message } => {
+            let source_id = match id {
+                Some(sid) => sid,
+                None => persistence::load_session().id,
+            };
+            match persistence::fork_session(&source_id, message) {
+                Ok(forked) => {
+                    println!(
+                        "{}",
+                        format!(
+                            "Forked session {} → {} (\"{}\")",
+                            source_id, forked.id, forked.title
+                        )
+                        .green()
+                    );
+                    if let Some(idx) = message {
+                        println!(
+                            "  {} messages copied (forked at message index {})",
+                            forked.conversation.len(),
+                            idx
+                        );
+                    } else {
+                        println!(
+                            "  {} messages copied (full fork)",
+                            forked.conversation.len()
+                        );
+                    }
+                }
+                Err(e) => {
+                    println!("{}", format!("Fork failed: {e}").red());
+                }
+            }
+            Ok(())
+        }
+        SessionCommands::Children { id } => {
+            let source_id = match id {
+                Some(sid) => sid,
+                None => persistence::load_session().id,
+            };
+            let children = persistence::list_session_children(&source_id);
+            if children.is_empty() {
+                println!(
+                    "{}",
+                    format!("No forks found for session {source_id}.").dimmed()
+                );
+            } else {
+                println!(
+                    "{}",
+                    format!("Forks of session {source_id}:").yellow().bold()
+                );
+                for (cid, title, updated, msgs) in &children {
+                    println!(
+                        "  {} {} ({} msgs, {})",
+                        cid.cyan(),
+                        title,
+                        msgs,
+                        updated.dimmed()
+                    );
+                }
+            }
             Ok(())
         }
     }
