@@ -3,22 +3,47 @@ use colored::Colorize;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Job type: shell command or AI prompt
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum JobKind {
+    /// Execute a shell command via `sh -c`
+    Shell,
+    /// Send a prompt to the AI model for processing
+    Prompt,
+}
+
+impl Default for JobKind {
+    fn default() -> Self {
+        JobKind::Shell
+    }
+}
+
 /// A scheduled cron job
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CronJob {
     pub id: String,
     /// Human-readable schedule (e.g., "5m", "1h", "30s", "daily")
     pub schedule: String,
-    /// Shell command to execute
+    /// Shell command or AI prompt to execute
     pub command: String,
     /// Description of what this job does
     pub description: String,
     /// Whether this job is enabled
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Job type: "shell" or "prompt"
+    #[serde(default)]
+    pub kind: JobKind,
     /// Last run timestamp (ISO 8601)
     #[serde(default)]
     pub last_run: Option<String>,
+    /// Last run status
+    #[serde(default)]
+    pub last_status: Option<String>,
+    /// Consecutive error count
+    #[serde(default)]
+    pub error_count: u32,
     /// Created timestamp
     pub created_at: String,
 }
@@ -122,7 +147,13 @@ impl CronManager {
     }
 
     /// Add a new job, returns the job ID.
-    pub fn add_job(&mut self, schedule: &str, command: &str, description: &str) -> Result<String> {
+    pub fn add_job(
+        &mut self,
+        schedule: &str,
+        command: &str,
+        description: &str,
+        kind: JobKind,
+    ) -> Result<String> {
         // Validate the schedule before adding
         parse_schedule(schedule)?;
 
@@ -134,7 +165,10 @@ impl CronManager {
             command: command.to_string(),
             description: description.to_string(),
             enabled: true,
+            kind,
             last_run: None,
+            last_status: None,
+            error_count: 0,
             created_at: now,
         };
         self.jobs.push(job);
@@ -177,14 +211,15 @@ impl CronManager {
 
         let mut lines = Vec::new();
         lines.push(format!(
-            "{:<10} {:<10} {:<8} {:<30} {}",
+            "{:<10} {:<8} {:<10} {:<8} {:<24} {}",
             "ID".bold(),
+            "Kind".bold(),
             "Schedule".bold(),
             "Status".bold(),
             "Description".bold(),
-            "Command".bold(),
+            "Command/Prompt".bold(),
         ));
-        lines.push("-".repeat(90));
+        lines.push("-".repeat(96));
 
         for job in &self.jobs {
             let status = if job.enabled {
@@ -192,13 +227,23 @@ impl CronManager {
             } else {
                 "off".red().to_string()
             };
+            let kind_str = match job.kind {
+                JobKind::Shell => "shell",
+                JobKind::Prompt => "prompt",
+            };
+            let cmd_display = if job.command.len() > 40 {
+                format!("{}...", &job.command[..37])
+            } else {
+                job.command.clone()
+            };
             lines.push(format!(
-                "{:<10} {:<10} {:<8} {:<30} {}",
+                "{:<10} {:<8} {:<10} {:<8} {:<24} {}",
                 job.id.cyan(),
+                kind_str.yellow(),
                 job.schedule,
                 status,
                 job.description,
-                job.command.dimmed(),
+                cmd_display.dimmed(),
             ));
         }
 
@@ -208,18 +253,18 @@ impl CronManager {
     /// Start the background scheduler.
     ///
     /// Runs enabled jobs at their configured intervals by checking each job's
-    /// `last_run` timestamp. Executes commands via `sh -c`. Continues running
-    /// even when individual jobs fail.
+    /// `last_run` timestamp. Shell jobs execute via `sh -c`. Prompt jobs are
+    /// sent to the provided `prompt_sender` channel for the main loop to process.
     ///
     /// Returns a `JoinHandle` that can be aborted on application exit.
-    pub fn start_scheduler(self) -> tokio::task::JoinHandle<()> {
+    pub fn start_scheduler(
+        self,
+        prompt_sender: tokio::sync::mpsc::UnboundedSender<CronPromptRequest>,
+    ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
-            // We keep our own mutable copy of the jobs list so we can update
-            // `last_run` in memory. We also persist changes back to disk.
             let mut jobs = self.jobs;
 
             loop {
-                // Sleep a short tick between evaluation rounds.
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
                 let now = chrono::Utc::now();
@@ -249,7 +294,6 @@ impl CronManager {
                                     now.signed_duration_since(last_dt).num_seconds().max(0) as u64;
                                 elapsed >= interval_secs
                             } else {
-                                // Unparseable last_run — treat as due
                                 true
                             }
                         }
@@ -260,66 +304,111 @@ impl CronManager {
                         continue;
                     }
 
+                    let kind_label = match jobs[i].kind {
+                        JobKind::Shell => "shell",
+                        JobKind::Prompt => "prompt",
+                    };
                     eprintln!(
-                        "{} running job {} ({}): {}",
+                        "{} running {} job {} ({}): {}",
                         "[cron]".yellow(),
+                        kind_label.cyan(),
                         jobs[i].id.cyan(),
                         jobs[i].description.dimmed(),
                         jobs[i].command.dimmed(),
                     );
 
-                    let result = tokio::process::Command::new("sh")
-                        .arg("-c")
-                        .arg(&jobs[i].command)
-                        .output()
-                        .await;
-
                     let timestamp = chrono::Utc::now().to_rfc3339();
                     jobs[i].last_run = Some(timestamp);
 
-                    match result {
-                        Ok(output) => {
-                            if output.status.success() {
+                    match jobs[i].kind {
+                        JobKind::Shell => {
+                            let result = tokio::process::Command::new("sh")
+                                .arg("-c")
+                                .arg(&jobs[i].command)
+                                .output()
+                                .await;
+
+                            match result {
+                                Ok(output) if output.status.success() => {
+                                    jobs[i].last_status = Some("ok".into());
+                                    jobs[i].error_count = 0;
+                                    eprintln!(
+                                        "{} job {} {}",
+                                        "[cron]".yellow(),
+                                        jobs[i].id.cyan(),
+                                        "completed successfully".green(),
+                                    );
+                                }
+                                Ok(output) => {
+                                    jobs[i].error_count += 1;
+                                    let code = output
+                                        .status
+                                        .code()
+                                        .map(|c| c.to_string())
+                                        .unwrap_or_else(|| "unknown".into());
+                                    let stderr = String::from_utf8_lossy(&output.stderr);
+                                    jobs[i].last_status = Some(format!("error(exit {code})"));
+                                    eprintln!(
+                                        "{} job {} {} (exit {}): {}",
+                                        "[cron]".yellow(),
+                                        jobs[i].id.cyan(),
+                                        "failed".red(),
+                                        code,
+                                        stderr.trim().dimmed(),
+                                    );
+                                }
+                                Err(e) => {
+                                    jobs[i].error_count += 1;
+                                    jobs[i].last_status = Some(format!("error: {e}"));
+                                    eprintln!(
+                                        "{} job {} {}: {}",
+                                        "[cron]".yellow(),
+                                        jobs[i].id.cyan(),
+                                        "execution error".red(),
+                                        e.to_string().dimmed(),
+                                    );
+                                }
+                            }
+                        }
+                        JobKind::Prompt => {
+                            let req = CronPromptRequest {
+                                job_id: jobs[i].id.clone(),
+                                prompt: jobs[i].command.clone(),
+                            };
+                            if prompt_sender.send(req).is_ok() {
+                                jobs[i].last_status = Some("ok".into());
+                                jobs[i].error_count = 0;
                                 eprintln!(
-                                    "{} job {} {}",
+                                    "{} prompt job {} {}",
                                     "[cron]".yellow(),
                                     jobs[i].id.cyan(),
-                                    "completed successfully".green(),
+                                    "queued for processing".green(),
                                 );
                             } else {
-                                let code = output
-                                    .status
-                                    .code()
-                                    .map(|c| c.to_string())
-                                    .unwrap_or_else(|| "unknown".into());
-                                let stderr = String::from_utf8_lossy(&output.stderr);
+                                jobs[i].error_count += 1;
+                                jobs[i].last_status = Some("error: channel closed".into());
                                 eprintln!(
-                                    "{} job {} {} (exit {}): {}",
+                                    "{} prompt job {} {}: channel closed",
                                     "[cron]".yellow(),
                                     jobs[i].id.cyan(),
                                     "failed".red(),
-                                    code,
-                                    stderr.trim().dimmed(),
                                 );
                             }
                         }
-                        Err(e) => {
-                            eprintln!(
-                                "{} job {} {}: {}",
-                                "[cron]".yellow(),
-                                jobs[i].id.cyan(),
-                                "execution error".red(),
-                                e.to_string().dimmed(),
-                            );
-                        }
                     }
 
-                    // Persist updated last_run to disk (best-effort).
                     let _ = persist_jobs(&jobs);
                 }
             }
         })
     }
+}
+
+/// A prompt request from a cron job to be processed by the main loop.
+#[derive(Debug)]
+pub struct CronPromptRequest {
+    pub job_id: String,
+    pub prompt: String,
 }
 
 /// Helper to persist the jobs list to disk from within the scheduler loop.

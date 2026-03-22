@@ -261,15 +261,18 @@ enum SkillsCommands {
 enum CronCommands {
     /// List all scheduled jobs
     List,
-    /// Add a new cron job
+    /// Add a new cron job (shell command by default, use --prompt for AI prompt)
     Add {
         /// Schedule interval (e.g., "5m", "1h", "30s", "daily")
         schedule: String,
-        /// Shell command to run
+        /// Shell command or AI prompt to run
         command: String,
         /// Description of the job
         #[arg(short, long, default_value = "")]
         description: String,
+        /// Treat command as an AI prompt instead of a shell command
+        #[arg(short, long)]
+        prompt: bool,
     },
     /// Remove a cron job by ID
     Remove {
@@ -1110,12 +1113,20 @@ fn run_cron_command(cmd: CronCommands) -> Result<()> {
             schedule,
             command,
             description,
+            prompt,
         } => {
-            let id = manager.add_job(&schedule, &command, &description)?;
-            println!("{}", format!("Cron job added: {id}").green());
+            let kind = if prompt {
+                cron::JobKind::Prompt
+            } else {
+                cron::JobKind::Shell
+            };
+            let id = manager.add_job(&schedule, &command, &description, kind.clone())?;
+            let kind_label = if prompt { "prompt" } else { "shell" };
+            println!("{}", format!("Cron job added: {id} ({kind_label})").green());
             println!(
-                "  Schedule: {}, Command: {}",
+                "  Schedule: {}, {}: {}",
                 schedule.cyan(),
+                if prompt { "Prompt" } else { "Command" },
                 command.dimmed()
             );
         }
@@ -1606,6 +1617,22 @@ async fn run_interactive(initial_message: Option<String>, oneshot: bool) -> Resu
             .await;
     }
 
+    // Start cron scheduler in background
+    let (cron_tx, mut cron_rx) = tokio::sync::mpsc::unbounded_channel::<cron::CronPromptRequest>();
+    let cron_manager = cron::CronManager::load();
+    let cron_job_count = cron_manager
+        .list_jobs()
+        .iter()
+        .filter(|j| j.enabled)
+        .count();
+    let cron_handle = cron_manager.start_scheduler(cron_tx);
+    if cron_job_count > 0 && !oneshot {
+        eprintln!(
+            "{}",
+            format!("Cron: {} active job(s) scheduled", cron_job_count).dimmed()
+        );
+    }
+
     // If an initial message was provided, process it first
     if let Some(ref msg) = initial_message {
         if oneshot {
@@ -1647,6 +1674,27 @@ async fn run_interactive(initial_message: Option<String>, oneshot: bool) -> Resu
 
         let input = input.trim();
         if input.is_empty() {
+            // While idle, drain any pending cron prompt requests
+            while let Ok(req) = cron_rx.try_recv() {
+                println!();
+                println!(
+                    "{} processing cron prompt job {}: {}",
+                    "[cron]".yellow(),
+                    req.job_id.cyan(),
+                    req.prompt.dimmed(),
+                );
+                process_user_message(
+                    &req.prompt,
+                    &mut session,
+                    &mut config,
+                    &full_system_prompt,
+                    client.as_ref(),
+                    &tool_defs,
+                    &permissions,
+                    &hook_mgr,
+                )
+                .await?;
+            }
             continue;
         }
 
@@ -1729,7 +1777,32 @@ async fn run_interactive(initial_message: Option<String>, oneshot: bool) -> Resu
             &hook_mgr,
         )
         .await?;
+
+        // After processing user message, drain any pending cron prompt jobs
+        while let Ok(req) = cron_rx.try_recv() {
+            println!();
+            println!(
+                "{} processing cron prompt job {}: {}",
+                "[cron]".yellow(),
+                req.job_id.cyan(),
+                req.prompt.dimmed(),
+            );
+            process_user_message(
+                &req.prompt,
+                &mut session,
+                &mut config,
+                &full_system_prompt,
+                client.as_ref(),
+                &tool_defs,
+                &permissions,
+                &hook_mgr,
+            )
+            .await?;
+        }
     }
+
+    // Stop cron scheduler
+    cron_handle.abort();
 
     // Fire session_end hook
     {
@@ -2512,7 +2585,7 @@ fn handle_command(
                 if manager.list_jobs().is_empty() {
                     println!(
                         "{}",
-                        "No cron jobs. Use: /cron add <schedule> <command>".dimmed()
+                        "No cron jobs. Use: /cron add <schedule> <command>  or  /cron prompt <schedule> <prompt>".dimmed()
                     );
                 } else {
                     print!("{}", manager.format_jobs());
@@ -2521,14 +2594,33 @@ fn handle_command(
                 let rest = arg.strip_prefix("add ").unwrap_or("").trim();
                 let parts: Vec<&str> = rest.splitn(2, ' ').collect();
                 if parts.len() < 2 {
-                    println!("{}", "Usage: /cron add <schedule> <command>".yellow());
+                    println!("{}", "Usage: /cron add <schedule> <shell-command>".yellow());
                 } else {
                     let mut manager = cron::CronManager::load();
-                    match manager.add_job(parts[0], parts[1], "") {
+                    match manager.add_job(parts[0], parts[1], "", cron::JobKind::Shell) {
                         Ok(id) => println!(
                             "{}",
                             format!(
-                                "Cron job added: {} (every {}, cmd: {})",
+                                "Shell cron job added: {} (every {}, cmd: {})",
+                                id, parts[0], parts[1]
+                            )
+                            .green()
+                        ),
+                        Err(e) => println!("{}", format!("Failed: {e}").red()),
+                    }
+                }
+            } else if arg.starts_with("prompt ") {
+                let rest = arg.strip_prefix("prompt ").unwrap_or("").trim();
+                let parts: Vec<&str> = rest.splitn(2, ' ').collect();
+                if parts.len() < 2 {
+                    println!("{}", "Usage: /cron prompt <schedule> <ai-prompt>".yellow());
+                } else {
+                    let mut manager = cron::CronManager::load();
+                    match manager.add_job(parts[0], parts[1], "", cron::JobKind::Prompt) {
+                        Ok(id) => println!(
+                            "{}",
+                            format!(
+                                "Prompt cron job added: {} (every {}, prompt: {})",
                                 id, parts[0], parts[1]
                             )
                             .green()
@@ -2547,7 +2639,7 @@ fn handle_command(
             } else {
                 println!(
                     "{}",
-                    "Usage: /cron [list|add <schedule> <cmd>|remove <id>]".yellow()
+                    "Usage: /cron [list|add <schedule> <cmd>|prompt <schedule> <prompt>|remove <id>]".yellow()
                 );
             }
         }
