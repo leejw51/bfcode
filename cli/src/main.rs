@@ -11,6 +11,7 @@ mod gateway;
 mod guard;
 mod lsp;
 mod mcp;
+pub mod patch;
 mod persistence;
 mod plugin;
 mod search;
