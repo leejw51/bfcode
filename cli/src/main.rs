@@ -1467,6 +1467,9 @@ async fn run_interactive(initial_message: Option<String>, oneshot: bool) -> Resu
     // Load project session
     let mut session = persistence::load_session();
 
+    // Load any persisted todos for this session into the in-memory cache
+    tools::load_todos_for_session(&session.id);
+
     // Load project instructions (AGENTS.md, CLAUDE.md, BFCODE.md, etc.)
     let instructions = persistence::load_instructions();
 
@@ -1594,6 +1597,28 @@ async fn run_interactive(initial_message: Option<String>, oneshot: bool) -> Resu
                 .find(|l| l.contains("from "))
                 .unwrap_or("project instructions");
             println!("Loaded:   {}", file_hint.dimmed());
+        }
+        // Show todo summary if session has active todos
+        {
+            let todos = tools::get_session_todos(&session.id);
+            if !todos.is_empty() {
+                let done = todos
+                    .iter()
+                    .filter(|t| {
+                        t.status == types::TodoStatus::Completed
+                            || t.status == types::TodoStatus::Cancelled
+                    })
+                    .count();
+                let active = todos.len() - done;
+                if active > 0 {
+                    println!(
+                        "Todos:    {} ({} active, {} done)",
+                        format!("{}", todos.len()).cyan(),
+                        format!("{active}").yellow(),
+                        format!("{done}").green(),
+                    );
+                }
+            }
         }
         println!();
         println!(
@@ -2171,6 +2196,11 @@ async fn process_user_message(
                 let result = guard::truncate_tool_result(&result, &config.model);
                 tools::print_tool_result(&result);
 
+                // Show colored todo progress after todowrite
+                if tc.function.name == "todowrite" {
+                    tools::print_todo_summary(&session.id);
+                }
+
                 // Fire tool_after hook
                 let after_ctx = plugin::HookContext {
                     session_id: session.id.clone(),
@@ -2306,6 +2336,7 @@ fn handle_command(
             println!("  {}       - list available agents", "/agents".yellow());
             println!("  {}       - list available skills", "/skills".yellow());
             println!("  {} - activate a skill", "/skill <name>".yellow());
+            println!("  {}         - show session todo list", "/todo".yellow());
             println!("  {}    - manage cron jobs", "/cron [cmd]".yellow());
             println!("  {}       - run health checks", "/doctor".yellow());
             println!("  {}         - exit", "/quit".yellow());
@@ -2412,10 +2443,16 @@ fn handle_command(
                 match persistence::switch_session(arg) {
                     Some(loaded) => {
                         *session = loaded;
+                        tools::load_todos_for_session(&session.id);
                         println!(
                             "{}",
                             format!("Resumed session: {} ({})", session.id, session.title).green()
                         );
+                        // Show todos if any exist
+                        let todos = tools::get_session_todos(&session.id);
+                        if !todos.is_empty() {
+                            tools::print_todo_summary(&session.id);
+                        }
                     }
                     None => {
                         println!("{}", format!("Session '{arg}' not found.").red());
@@ -2578,6 +2615,9 @@ fn handle_command(
                     }
                 }
             }
+        }
+        "/todo" | "/todos" => {
+            tools::print_todo_summary(&session.id);
         }
         "/cron" => {
             if arg.is_empty() || arg == "list" {

@@ -2679,6 +2679,124 @@ fn format_todos(items: &[TodoItem]) -> String {
     output
 }
 
+/// Load todos from disk into SESSION_TODOS cache for the given session.
+/// Called on session restore to ensure todos are available immediately.
+pub fn load_todos_for_session(session_id: &str) {
+    let todo_path = format!(".bfcode/sessions/{session_id}_todos.json");
+    if let Ok(data) = std::fs::read_to_string(&todo_path) {
+        if let Ok(items) = serde_json::from_str::<Vec<TodoItem>>(&data) {
+            if !items.is_empty() {
+                let mut todos = SESSION_TODOS.lock().unwrap_or_else(|e| e.into_inner());
+                todos.insert(session_id.to_string(), items);
+            }
+        }
+    }
+}
+
+/// Get the current todos for a session (from cache or disk).
+/// Returns an empty Vec if no todos exist.
+pub fn get_session_todos(session_id: &str) -> Vec<TodoItem> {
+    // Check in-memory cache first
+    let todos = SESSION_TODOS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(items) = todos.get(session_id) {
+        if !items.is_empty() {
+            return items.clone();
+        }
+    }
+    drop(todos);
+
+    // Try loading from disk
+    let todo_path = format!(".bfcode/sessions/{session_id}_todos.json");
+    if let Ok(data) = std::fs::read_to_string(&todo_path) {
+        if let Ok(items) = serde_json::from_str::<Vec<TodoItem>>(&data) {
+            if !items.is_empty() {
+                let mut todos = SESSION_TODOS.lock().unwrap_or_else(|e| e.into_inner());
+                todos.insert(session_id.to_string(), items.clone());
+                return items;
+            }
+        }
+    }
+    Vec::new()
+}
+
+/// Print a colored todo summary to stderr (for REPL display).
+pub fn print_todo_summary(session_id: &str) {
+    use colored::Colorize;
+    let items = get_session_todos(session_id);
+    if items.is_empty() {
+        eprintln!("  {}", "No todos in this session.".dimmed());
+        return;
+    }
+
+    let total = items.len();
+    let completed = items
+        .iter()
+        .filter(|t| t.status == TodoStatus::Completed)
+        .count();
+    let cancelled = items
+        .iter()
+        .filter(|t| t.status == TodoStatus::Cancelled)
+        .count();
+    let in_progress = items
+        .iter()
+        .filter(|t| t.status == TodoStatus::InProgress)
+        .count();
+    let pending = items
+        .iter()
+        .filter(|t| t.status == TodoStatus::Pending)
+        .count();
+
+    // Progress bar
+    let done = completed + cancelled;
+    let bar_width = 20;
+    let filled = if total > 0 {
+        (done * bar_width) / total
+    } else {
+        0
+    };
+    let bar: String = format!(
+        "[{}{}] {}/{}",
+        "█".repeat(filled),
+        "░".repeat(bar_width - filled),
+        done,
+        total
+    );
+    eprintln!("  {} {}", "Todo".yellow().bold(), bar.dimmed());
+
+    for (i, item) in items.iter().enumerate() {
+        let (icon, style_fn): (&str, fn(&str) -> colored::ColoredString) = match item.status {
+            TodoStatus::Completed => ("[✓]", |s: &str| s.green()),
+            TodoStatus::InProgress => ("[•]", |s: &str| s.yellow()),
+            TodoStatus::Pending => ("[ ]", |s: &str| s.white()),
+            TodoStatus::Cancelled => ("[x]", |s: &str| s.dimmed()),
+        };
+        let priority_tag = match item.priority {
+            TodoPriority::High => " ↑HIGH",
+            TodoPriority::Medium => "",
+            TodoPriority::Low => " ↓low",
+        };
+        let content_display = format!("{}{}", item.content, priority_tag);
+        eprintln!(
+            "  {}. {} {}",
+            format!("{}", i + 1).dimmed(),
+            style_fn(icon),
+            if item.status == TodoStatus::Completed || item.status == TodoStatus::Cancelled {
+                content_display.dimmed().to_string()
+            } else {
+                style_fn(&content_display).to_string()
+            }
+        );
+    }
+
+    eprintln!(
+        "  {} {} pending, {} in progress, {} done",
+        "~".dimmed(),
+        pending.to_string().white(),
+        in_progress.to_string().yellow(),
+        completed.to_string().green(),
+    );
+}
+
 // --- Plan Mode Tools ---
 
 /// Get the current agent mode
@@ -4075,6 +4193,45 @@ mod tests {
         assert!(output.contains("1 pending"));
         assert!(output.contains("1 in progress"));
         assert!(output.contains("1 completed"));
+    }
+
+    #[tokio::test]
+    async fn test_get_session_todos_and_load() {
+        let session_id = format!("test_todo_get_{}", std::process::id());
+
+        // Initially empty
+        let items = get_session_todos(&session_id);
+        assert!(items.is_empty());
+
+        // Write some todos via exec_todowrite
+        let args = serde_json::json!({
+            "todos": [
+                {"content": "Task A", "status": "pending", "priority": "high"},
+                {"content": "Task B", "status": "completed"}
+            ]
+        });
+        exec_todowrite(&args.to_string(), &session_id)
+            .await
+            .unwrap();
+
+        // get_session_todos should return them
+        let items = get_session_todos(&session_id);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].content, "Task A");
+        assert_eq!(items[0].status, TodoStatus::Pending);
+        assert_eq!(items[1].status, TodoStatus::Completed);
+
+        // Clear in-memory cache and test disk loading
+        {
+            let mut todos = SESSION_TODOS.lock().unwrap();
+            todos.remove(&session_id);
+        }
+        load_todos_for_session(&session_id);
+        let items = get_session_todos(&session_id);
+        assert_eq!(items.len(), 2);
+
+        // Clean up
+        let _ = std::fs::remove_file(format!(".bfcode/sessions/{session_id}_todos.json"));
     }
 
     // ==============================
