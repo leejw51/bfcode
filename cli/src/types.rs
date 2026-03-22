@@ -263,6 +263,14 @@ pub struct ChatRequest {
     pub temperature: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<ToolDefinition>>,
+    /// Request usage stats in streaming responses (OpenAI-compatible)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_options: Option<StreamOptions>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct StreamOptions {
+    pub include_usage: bool,
 }
 
 /// An image attachment embedded in a message
@@ -620,6 +628,18 @@ pub struct ProjectSession {
     /// Parent session ID — set when this session was forked from another
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<String>,
+    /// Cumulative input tokens across all API calls in this session
+    #[serde(default)]
+    pub total_input_tokens: u64,
+    /// Cumulative output tokens across all API calls in this session
+    #[serde(default)]
+    pub total_output_tokens: u64,
+    /// Cumulative cost in USD across all API calls in this session
+    #[serde(default)]
+    pub total_cost: f64,
+    /// Model used in this session (for cost calculation)
+    #[serde(default)]
+    pub model: String,
 }
 
 impl ProjectSession {
@@ -634,6 +654,10 @@ impl ProjectSession {
             created_at: now.clone(),
             updated_at: now,
             parent_id: None,
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            total_cost: 0.0,
+            model: String::new(),
         }
     }
 
@@ -678,6 +702,10 @@ impl ProjectSession {
             created_at: now.clone(),
             updated_at: now,
             parent_id: Some(self.id.clone()),
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            total_cost: 0.0,
+            model: self.model.clone(),
         }
     }
 
@@ -1301,10 +1329,29 @@ mod tests {
             stream: false,
             temperature: 0.0,
             tools: None,
+            stream_options: None,
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("grok-4-1-fast"));
         assert!(!json.contains("tools")); // None should be skipped
+        assert!(!json.contains("stream_options")); // None should be skipped
+    }
+
+    #[test]
+    fn test_chat_request_stream_options_included_when_streaming() {
+        let req = ChatRequest {
+            model: "grok-4-1-fast".into(),
+            messages: vec![Message::user("hi")],
+            stream: true,
+            temperature: 0.0,
+            tools: None,
+            stream_options: Some(StreamOptions {
+                include_usage: true,
+            }),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("stream_options"));
+        assert!(json.contains("include_usage"));
     }
 
     #[test]
@@ -1675,5 +1722,126 @@ mod tests {
         let json = r#"{"url": "https://example.com"}"#;
         let args: WebFetchArgs = serde_json::from_str(json).unwrap();
         assert_eq!(args.url, "https://example.com");
+    }
+
+    // ── ProjectSession cost/token tracking ────────────────────────────
+
+    #[test]
+    fn test_session_new_has_zero_cost_fields() {
+        let session = ProjectSession::new();
+        assert_eq!(session.total_input_tokens, 0);
+        assert_eq!(session.total_output_tokens, 0);
+        assert_eq!(session.total_cost, 0.0);
+        assert!(session.model.is_empty());
+    }
+
+    #[test]
+    fn test_session_cost_fields_accumulate() {
+        let mut session = ProjectSession::new();
+        session.total_input_tokens += 100;
+        session.total_output_tokens += 50;
+        session.total_cost += calculate_cost("gpt-4o", 100, 50);
+        session.model = "gpt-4o".into();
+
+        session.total_input_tokens += 200;
+        session.total_output_tokens += 80;
+        session.total_cost += calculate_cost("gpt-4o", 200, 80);
+
+        assert_eq!(session.total_input_tokens, 300);
+        assert_eq!(session.total_output_tokens, 130);
+        assert!(session.total_cost > 0.0);
+        assert_eq!(session.model, "gpt-4o");
+    }
+
+    #[test]
+    fn test_session_serialize_with_cost_fields() {
+        let mut session = ProjectSession::new();
+        session.total_input_tokens = 1000;
+        session.total_output_tokens = 500;
+        session.total_cost = 0.0125;
+        session.model = "gpt-4o".into();
+
+        let json = serde_json::to_string(&session).unwrap();
+        assert!(json.contains("\"total_input_tokens\":1000"));
+        assert!(json.contains("\"total_output_tokens\":500"));
+        assert!(json.contains("\"total_cost\":0.0125"));
+        assert!(json.contains("\"model\":\"gpt-4o\""));
+    }
+
+    #[test]
+    fn test_session_deserialize_without_cost_fields_defaults() {
+        // Simulates loading an old session file without the new fields
+        let json = r#"{
+            "id": "test_old",
+            "title": "Old session",
+            "conversation": [],
+            "total_tokens": 42,
+            "created_at": "2026-01-01 00:00:00",
+            "updated_at": "2026-01-01 00:00:00"
+        }"#;
+        let session: ProjectSession = serde_json::from_str(json).unwrap();
+        assert_eq!(session.total_tokens, 42);
+        assert_eq!(session.total_input_tokens, 0);
+        assert_eq!(session.total_output_tokens, 0);
+        assert_eq!(session.total_cost, 0.0);
+        assert!(session.model.is_empty());
+    }
+
+    #[test]
+    fn test_session_deserialize_with_cost_fields() {
+        let json = r#"{
+            "id": "test_new",
+            "title": "New session",
+            "conversation": [],
+            "total_tokens": 1500,
+            "created_at": "2026-03-22 10:00:00",
+            "updated_at": "2026-03-22 11:00:00",
+            "total_input_tokens": 1000,
+            "total_output_tokens": 500,
+            "total_cost": 0.0075,
+            "model": "claude-sonnet-4-20250514"
+        }"#;
+        let session: ProjectSession = serde_json::from_str(json).unwrap();
+        assert_eq!(session.total_input_tokens, 1000);
+        assert_eq!(session.total_output_tokens, 500);
+        assert!((session.total_cost - 0.0075).abs() < 1e-10);
+        assert_eq!(session.model, "claude-sonnet-4-20250514");
+    }
+
+    #[test]
+    fn test_session_fork_resets_cost_fields() {
+        let mut session = ProjectSession::new();
+        session.total_input_tokens = 5000;
+        session.total_output_tokens = 2000;
+        session.total_cost = 0.50;
+        session.model = "gpt-4o".into();
+        session
+            .conversation
+            .push(Message::user("hello"));
+        session
+            .conversation
+            .push(Message::assistant_text("hi there"));
+
+        let forked = session.fork(None, 0);
+        assert_eq!(forked.total_input_tokens, 0);
+        assert_eq!(forked.total_output_tokens, 0);
+        assert_eq!(forked.total_cost, 0.0);
+        assert_eq!(forked.model, "gpt-4o"); // model is carried over
+        assert!(forked.parent_id.is_some());
+    }
+
+    #[test]
+    fn test_session_roundtrip_cost_precision() {
+        let mut session = ProjectSession::new();
+        session.total_cost = 123.456789;
+        session.total_input_tokens = u64::MAX;
+        session.total_output_tokens = 999_999_999;
+
+        let json = serde_json::to_string(&session).unwrap();
+        let restored: ProjectSession = serde_json::from_str(&json).unwrap();
+
+        assert!((restored.total_cost - 123.456789).abs() < 1e-6);
+        assert_eq!(restored.total_input_tokens, u64::MAX);
+        assert_eq!(restored.total_output_tokens, 999_999_999);
     }
 }

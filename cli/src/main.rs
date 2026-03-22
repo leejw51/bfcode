@@ -141,6 +141,16 @@ enum Commands {
 
     /// Start Telegram bot (requires TELEGRAM_BOT_TOKEN env var)
     Telegram,
+
+    /// Show token usage and cost statistics across sessions
+    Stats {
+        /// Show stats for the last N days (default: all time)
+        #[arg(long)]
+        days: Option<u32>,
+        /// Show top N tools by usage (default: 10)
+        #[arg(long)]
+        tools: Option<usize>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -407,6 +417,7 @@ async fn main() -> Result<()> {
         Some(Commands::Plugin(cmd)) => run_plugin_command(cmd),
         Some(Commands::Cfg(cmd)) => run_cfg_command(cmd),
         Some(Commands::Telegram) => telegram::run_telegram_bot().await,
+        Some(Commands::Stats { days, tools }) => run_stats_command(days, tools),
     }
 }
 
@@ -1281,6 +1292,276 @@ fn run_diagnostics_command() -> Result<()> {
     Ok(())
 }
 
+fn run_stats_command(days: Option<u32>, tool_limit: Option<usize>) -> Result<()> {
+    let sessions_dir = std::path::PathBuf::from(".bfcode/sessions");
+    if !sessions_dir.exists() {
+        println!("{}", "No sessions found.".dimmed());
+        return Ok(());
+    }
+
+    let cutoff = days.map(|d| {
+        let now = chrono::Local::now();
+        now - chrono::Duration::days(d as i64)
+    });
+
+    let mut total_sessions: u64 = 0;
+    let mut total_messages: u64 = 0;
+    let mut total_input_tokens: u64 = 0;
+    let mut total_output_tokens: u64 = 0;
+    let mut total_tokens_all: u64 = 0;
+    let mut total_cost: f64 = 0.0;
+    let mut model_usage: std::collections::HashMap<String, (u64, u64, u64, f64)> =
+        std::collections::HashMap::new(); // model -> (input, output, messages, cost)
+    let mut tool_usage: std::collections::HashMap<String, u64> =
+        std::collections::HashMap::new();
+    let mut earliest: Option<String> = None;
+    let mut latest: Option<String> = None;
+
+    if let Ok(entries) = std::fs::read_dir(&sessions_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().map(|e| e == "json").unwrap_or(false) {
+                if let Ok(data) = std::fs::read_to_string(&path) {
+                    if let Ok(session) = serde_json::from_str::<ProjectSession>(&data) {
+                        // Filter by date if requested
+                        if let Some(ref cutoff_time) = cutoff {
+                            if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(
+                                &session.updated_at,
+                                "%Y-%m-%d %H:%M:%S",
+                            ) {
+                                if dt < cutoff_time.naive_local() {
+                                    continue;
+                                }
+                            }
+                        }
+
+                        total_sessions += 1;
+                        total_messages += session.conversation.len() as u64;
+                        total_input_tokens += session.total_input_tokens;
+                        total_output_tokens += session.total_output_tokens;
+                        total_tokens_all += session.total_tokens;
+                        total_cost += session.total_cost;
+
+                        // Track model usage
+                        if !session.model.is_empty() {
+                            let entry = model_usage
+                                .entry(session.model.clone())
+                                .or_insert((0, 0, 0, 0.0));
+                            entry.0 += session.total_input_tokens;
+                            entry.1 += session.total_output_tokens;
+                            entry.2 += 1;
+                            entry.3 += session.total_cost;
+                        }
+
+                        // Count tool usage from conversation
+                        for msg in &session.conversation {
+                            if let Some(tcs) = &msg.tool_calls {
+                                for tc in tcs {
+                                    *tool_usage.entry(tc.function.name.clone()).or_insert(0) += 1;
+                                }
+                            }
+                        }
+
+                        // Track date range
+                        match &earliest {
+                            None => earliest = Some(session.created_at.clone()),
+                            Some(e) if session.created_at < *e => {
+                                earliest = Some(session.created_at.clone())
+                            }
+                            _ => {}
+                        }
+                        match &latest {
+                            None => latest = Some(session.updated_at.clone()),
+                            Some(l) if session.updated_at > *l => {
+                                latest = Some(session.updated_at.clone())
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if total_sessions == 0 {
+        println!("{}", "No sessions found in the specified time range.".dimmed());
+        return Ok(());
+    }
+
+    let width = 60;
+    let sep = "─".repeat(width - 2);
+
+    // Helper closure for rendering rows
+    let render_row = |label: &str, value: &str| -> String {
+        let avail = width - 3; // account for "│" on each side + space
+        let padding = avail.saturating_sub(label.len() + value.len());
+        format!("│ {}{}{} │", label, " ".repeat(padding), value)
+    };
+
+    // Overview
+    println!("┌{}┐", sep);
+    println!(
+        "│{}│",
+        format!("{:^width$}", "OVERVIEW", width = width - 2)
+    );
+    println!("├{}┤", sep);
+    println!("{}", render_row("Sessions", &total_sessions.to_string()));
+    println!("{}", render_row("Messages", &total_messages.to_string()));
+    if let (Some(e), Some(l)) = (&earliest, &latest) {
+        println!("{}", render_row("Date Range", &format!("{} → {}", &e[..10], &l[..10])));
+    }
+    if let Some(d) = days {
+        println!("{}", render_row("Period", &format!("last {} days", d)));
+    }
+    println!("└{}┘", sep);
+    println!();
+
+    // Cost & Tokens
+    println!("┌{}┐", sep);
+    println!(
+        "│{}│",
+        format!("{:^width$}", "COST & TOKENS", width = width - 2)
+    );
+    println!("├{}┤", sep);
+    println!(
+        "{}",
+        render_row("Total Cost", &types::format_cost(total_cost))
+    );
+    let effective_days = days.unwrap_or_else(|| {
+        if let (Some(e), Some(l)) = (&earliest, &latest) {
+            if let (Ok(e_dt), Ok(l_dt)) = (
+                chrono::NaiveDateTime::parse_from_str(e, "%Y-%m-%d %H:%M:%S"),
+                chrono::NaiveDateTime::parse_from_str(l, "%Y-%m-%d %H:%M:%S"),
+            ) {
+                return std::cmp::max(1, (l_dt - e_dt).num_days() as u32);
+            }
+        }
+        1
+    });
+    println!(
+        "{}",
+        render_row(
+            "Avg Cost/Day",
+            &types::format_cost(total_cost / effective_days as f64)
+        )
+    );
+    println!(
+        "{}",
+        render_row(
+            "Avg Tokens/Session",
+            &format_tokens(if total_sessions > 0 {
+                total_tokens_all / total_sessions
+            } else {
+                0
+            })
+        )
+    );
+    println!(
+        "{}",
+        render_row("Input Tokens", &format_tokens(total_input_tokens))
+    );
+    println!(
+        "{}",
+        render_row("Output Tokens", &format_tokens(total_output_tokens))
+    );
+    println!(
+        "{}",
+        render_row("Total Tokens", &format_tokens(total_tokens_all))
+    );
+    println!("└{}┘", sep);
+    println!();
+
+    // Model Usage
+    if !model_usage.is_empty() {
+        let mut models: Vec<_> = model_usage.into_iter().collect();
+        models.sort_by(|a, b| b.1 .2.cmp(&a.1 .2));
+
+        println!("┌{}┐", sep);
+        println!(
+            "│{}│",
+            format!("{:^width$}", "MODEL USAGE", width = width - 2)
+        );
+        println!("├{}┤", sep);
+        for (model, (input, output, sessions, cost)) in &models {
+            println!(
+                "│ {:<width$} │",
+                model,
+                width = width - 4
+            );
+            println!("{}", render_row("  Sessions", &sessions.to_string()));
+            println!(
+                "{}",
+                render_row("  Input Tokens", &format_tokens(*input))
+            );
+            println!(
+                "{}",
+                render_row("  Output Tokens", &format_tokens(*output))
+            );
+            println!(
+                "{}",
+                render_row("  Cost", &types::format_cost(*cost))
+            );
+            println!("├{}┤", sep);
+        }
+        // Replace last separator with bottom border
+        print!("\x1B[1A");
+        println!("└{}┘", sep);
+        println!();
+    }
+
+    // Tool Usage
+    if !tool_usage.is_empty() {
+        let mut tools: Vec<_> = tool_usage.into_iter().collect();
+        tools.sort_by(|a, b| b.1.cmp(&a.1));
+        let limit = tool_limit.unwrap_or(10);
+        let tools_to_show: Vec<_> = tools.iter().take(limit).collect();
+        let max_count = tools_to_show.first().map(|(_, c)| *c).unwrap_or(1);
+        let total_tool_calls: u64 = tools.iter().map(|(_, c)| *c).sum();
+
+        println!("┌{}┐", sep);
+        println!(
+            "│{}│",
+            format!("{:^width$}", "TOOL USAGE", width = width - 2)
+        );
+        println!("├{}┤", sep);
+        for (tool, count) in &tools_to_show {
+            let bar_len = std::cmp::max(1, (*count as f64 / max_count as f64 * 20.0) as usize);
+            let bar = "█".repeat(bar_len);
+            let pct = (*count as f64 / total_tool_calls as f64) * 100.0;
+            let max_name_len = 18;
+            let name = if tool.len() > max_name_len {
+                format!("{}...", &tool[..max_name_len - 3])
+            } else {
+                tool.to_string()
+            };
+            let content = format!(
+                " {:<width$} {:<20} {:>4} ({:>5.1}%)",
+                name,
+                bar,
+                count,
+                pct,
+                width = max_name_len
+            );
+            let pad = (width - 2).saturating_sub(content.len());
+            println!("│{}{}│", content, " ".repeat(pad));
+        }
+        if tools.len() > limit {
+            let remaining: u64 = tools.iter().skip(limit).map(|(_, c)| *c).sum();
+            println!(
+                "{}",
+                render_row(
+                    &format!("  ... and {} more tools", tools.len() - limit),
+                    &format!("({} calls)", remaining)
+                )
+            );
+        }
+        println!("└{}┘", sep);
+        println!();
+    }
+
+    Ok(())
+}
+
 fn run_cfg_command(cmd: CfgCommands) -> Result<()> {
     match cmd {
         CfgCommands::Show => {
@@ -2142,9 +2423,15 @@ async fn process_user_message(
             }
         };
 
-        // Track tokens
+        // Track tokens and cost
         if let Some(usage) = &response.usage {
             session.total_tokens += usage.total_tokens;
+            session.total_input_tokens += usage.prompt_tokens;
+            session.total_output_tokens += usage.completion_tokens;
+            let call_cost =
+                types::calculate_cost(&config.model, usage.prompt_tokens, usage.completion_tokens);
+            session.total_cost += call_cost;
+            session.model = config.model.clone();
         }
 
         if response.choices.is_empty() {
@@ -2229,14 +2516,19 @@ async fn process_user_message(
 
         // Show token usage and cost
         if let Some(usage) = &response.usage {
-            let cost =
+            let call_cost =
                 types::calculate_cost(&config.model, usage.prompt_tokens, usage.completion_tokens);
             eprintln!(
-                "  {} tokens: {} this call | {} session total | cost: {}",
+                "  {} tokens: {}in/{}out ({} total) | session: {}in/{}out ({} total) | cost: {} (session: {})",
                 "~".dimmed(),
+                format_tokens(usage.prompt_tokens).dimmed(),
+                format_tokens(usage.completion_tokens).dimmed(),
                 format_tokens(usage.total_tokens).dimmed(),
+                format_tokens(session.total_input_tokens).dimmed(),
+                format_tokens(session.total_output_tokens).dimmed(),
                 format_tokens(session.total_tokens).dimmed(),
-                types::format_cost(cost).dimmed(),
+                types::format_cost(call_cost).dimmed(),
+                types::format_cost(session.total_cost).dimmed(),
             );
             // Emit machine-readable metadata in oneshot mode
             if std::env::var("BFCODE_ONESHOT").is_ok() {
@@ -2246,7 +2538,10 @@ async fn process_user_message(
                     "completion_tokens": usage.completion_tokens,
                     "total_tokens": usage.total_tokens,
                     "session_tokens": session.total_tokens,
-                    "cost": cost,
+                    "session_input_tokens": session.total_input_tokens,
+                    "session_output_tokens": session.total_output_tokens,
+                    "cost": call_cost,
+                    "session_cost": session.total_cost,
                     "model": &config.model,
                 });
                 eprintln!("__BFCODE_META__{}", meta);
@@ -2340,6 +2635,7 @@ fn handle_command(
             println!("  {}         - show session todo list", "/todo".yellow());
             println!("  {}    - manage cron jobs", "/cron [cmd]".yellow());
             println!("  {}       - run health checks", "/doctor".yellow());
+            println!("  {}        - show token usage & cost", "/usage".yellow());
             println!("  {}         - exit", "/quit".yellow());
             println!();
             println!("{}", "Image input:".yellow().bold());
@@ -2387,6 +2683,7 @@ fn handle_command(
                 "bfcode gateway ...".yellow()
             );
             println!("  {}  - background service", "bfcode daemon ...".yellow());
+            println!("  {}        - usage statistics", "bfcode stats".yellow());
             println!("  {}  - enhanced config mgmt", "bfcode cfg ...".yellow());
         }
         "/clear" => {
@@ -2683,6 +2980,37 @@ fn handle_command(
                     "Usage: /cron [list|add <schedule> <cmd>|prompt <schedule> <prompt>|remove <id>]".yellow()
                 );
             }
+        }
+        "/usage" | "/u" => {
+            let width = 56;
+            let sep = "─".repeat(width - 2);
+            let render_row = |label: &str, value: &str| -> String {
+                let avail = width - 3;
+                let padding = avail.saturating_sub(label.len() + value.len());
+                format!("│ {}{}{} │", label, " ".repeat(padding), value)
+            };
+
+            println!("┌{}┐", sep);
+            println!(
+                "│{}│",
+                format!("{:^width$}", "SESSION USAGE", width = width - 2)
+            );
+            println!("├{}┤", sep);
+            println!("{}", render_row("Session", &session.id));
+            println!("{}", render_row("Title", &session.title));
+            println!("{}", render_row("Model", &if session.model.is_empty() { config.model.clone() } else { session.model.clone() }));
+            println!("{}", render_row("Messages", &session.conversation.len().to_string()));
+            println!("├{}┤", sep);
+            println!("{}", render_row("Input Tokens", &format_tokens(session.total_input_tokens)));
+            println!("{}", render_row("Output Tokens", &format_tokens(session.total_output_tokens)));
+            println!("{}", render_row("Total Tokens", &format_tokens(session.total_tokens)));
+            println!("├{}┤", sep);
+            println!("{}", render_row("Session Cost", &types::format_cost(session.total_cost)));
+            if session.total_input_tokens > 0 {
+                let avg_cost_per_msg = session.total_cost / (session.conversation.iter().filter(|m| m.role == "assistant").count().max(1) as f64);
+                println!("{}", render_row("Avg Cost/Response", &types::format_cost(avg_cost_per_msg)));
+            }
+            println!("└{}┘", sep);
         }
         _ => {
             println!("{}", format!("Unknown command: {cmd}. Type /help").red());
@@ -3760,4 +4088,361 @@ mod tests {
     }
 
     use crate::types::{ChatResponse, Usage};
+
+    // ── Per-prompt token/cost tracking ────────────────────────────────
+
+    #[tokio::test]
+    async fn test_per_prompt_cost_tracking_text() {
+        run_in_tmp(|| async {
+            let mock = MockClient::new(vec![MockClient::text_response("Hello!")]);
+            let tool_defs = tools::get_tool_definitions();
+            let permissions = tools::Permissions::new();
+            let mut session = new_test_session();
+            let mut config = GlobalConfig::default();
+
+            process_user_message(
+                "hi",
+                &mut session,
+                &mut config,
+                "sys",
+                &mock,
+                &tool_defs,
+                &permissions,
+                &plugin::HookManager::with_hooks(vec![]),
+            )
+            .await
+            .unwrap();
+
+            // MockClient::text_response uses prompt_tokens=10, completion_tokens=5
+            assert_eq!(session.total_input_tokens, 10);
+            assert_eq!(session.total_output_tokens, 5);
+            assert!(session.total_cost > 0.0);
+            assert!(!session.model.is_empty());
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_per_prompt_cost_tracking_tool_then_text() {
+        run_in_tmp(|| async {
+            let mock = MockClient::new(vec![
+                MockClient::tool_call_response(vec![(
+                    "c1".into(),
+                    "list_files".into(),
+                    r#"{"path":"."}"#.into(),
+                )]),
+                MockClient::text_response("Done."),
+            ]);
+            let tool_defs = tools::get_tool_definitions();
+            let permissions = tools::Permissions::new();
+            let mut session = new_test_session();
+            let mut config = GlobalConfig::default();
+
+            process_user_message(
+                "list files",
+                &mut session,
+                &mut config,
+                "sys",
+                &mock,
+                &tool_defs,
+                &permissions,
+                &plugin::HookManager::with_hooks(vec![]),
+            )
+            .await
+            .unwrap();
+
+            // tool_call_response: prompt=20, completion=10
+            // text_response: prompt=10, completion=5
+            assert_eq!(session.total_input_tokens, 30);
+            assert_eq!(session.total_output_tokens, 15);
+            assert!(session.total_cost > 0.0);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_per_prompt_cost_accumulates_across_messages() {
+        run_in_tmp(|| async {
+            let mock = MockClient::new(vec![
+                MockClient::text_response("First reply"),
+                MockClient::text_response("Second reply"),
+            ]);
+            let tool_defs = tools::get_tool_definitions();
+            let permissions = tools::Permissions::new();
+            let mut session = new_test_session();
+            let mut config = GlobalConfig::default();
+
+            process_user_message(
+                "msg1",
+                &mut session,
+                &mut config,
+                "sys",
+                &mock,
+                &tool_defs,
+                &permissions,
+                &plugin::HookManager::with_hooks(vec![]),
+            )
+            .await
+            .unwrap();
+
+            let cost_after_first = session.total_cost;
+            let input_after_first = session.total_input_tokens;
+
+            process_user_message(
+                "msg2",
+                &mut session,
+                &mut config,
+                "sys",
+                &mock,
+                &tool_defs,
+                &permissions,
+                &plugin::HookManager::with_hooks(vec![]),
+            )
+            .await
+            .unwrap();
+
+            // Both calls use text_response: prompt=10, completion=5 each
+            assert_eq!(session.total_input_tokens, input_after_first * 2);
+            assert_eq!(session.total_output_tokens, 10); // 5 + 5
+            assert!(session.total_cost > cost_after_first);
+            assert!((session.total_cost - cost_after_first * 2.0).abs() < 1e-10);
+        })
+        .await;
+    }
+
+    // ── Stats command ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_stats_no_sessions_dir() {
+        with_tmp(|| {
+            let result = run_stats_command(None, None);
+            assert!(result.is_ok());
+        });
+    }
+
+    #[test]
+    fn test_stats_empty_sessions_dir() {
+        with_tmp(|| {
+            std::fs::create_dir_all(".bfcode/sessions").unwrap();
+            let result = run_stats_command(None, None);
+            assert!(result.is_ok());
+        });
+    }
+
+    #[test]
+    fn test_stats_with_sessions() {
+        with_tmp(|| {
+            std::fs::create_dir_all(".bfcode/sessions").unwrap();
+
+            // Create two test sessions with cost data
+            let mut s1 = ProjectSession::new();
+            s1.id = "stats_test_1".into();
+            s1.total_input_tokens = 1000;
+            s1.total_output_tokens = 500;
+            s1.total_cost = 0.0125;
+            s1.total_tokens = 1500;
+            s1.model = "gpt-4o".into();
+            s1.created_at = "2026-03-20 10:00:00".into();
+            s1.updated_at = "2026-03-20 11:00:00".into();
+            s1.conversation.push(Message::user("hello"));
+            s1.conversation
+                .push(Message::assistant_text("hi there"));
+
+            let mut s2 = ProjectSession::new();
+            s2.id = "stats_test_2".into();
+            s2.total_input_tokens = 2000;
+            s2.total_output_tokens = 800;
+            s2.total_cost = 0.017;
+            s2.total_tokens = 2800;
+            s2.model = "gpt-4o".into();
+            s2.created_at = "2026-03-21 10:00:00".into();
+            s2.updated_at = "2026-03-21 11:00:00".into();
+
+            let s1_json = serde_json::to_string_pretty(&s1).unwrap();
+            let s2_json = serde_json::to_string_pretty(&s2).unwrap();
+            std::fs::write(".bfcode/sessions/stats_test_1.json", &s1_json).unwrap();
+            std::fs::write(".bfcode/sessions/stats_test_2.json", &s2_json).unwrap();
+
+            let result = run_stats_command(None, None);
+            assert!(result.is_ok());
+        });
+    }
+
+    #[test]
+    fn test_stats_days_filter() {
+        with_tmp(|| {
+            std::fs::create_dir_all(".bfcode/sessions").unwrap();
+
+            // Old session (should be filtered out with --days 1)
+            let mut old = ProjectSession::new();
+            old.id = "old_session".into();
+            old.total_tokens = 100;
+            old.created_at = "2020-01-01 00:00:00".into();
+            old.updated_at = "2020-01-01 00:00:00".into();
+
+            // Recent session
+            let mut recent = ProjectSession::new();
+            recent.id = "recent_session".into();
+            recent.total_tokens = 200;
+            let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+            recent.created_at = now.clone();
+            recent.updated_at = now;
+
+            std::fs::write(
+                ".bfcode/sessions/old_session.json",
+                serde_json::to_string(&old).unwrap(),
+            )
+            .unwrap();
+            std::fs::write(
+                ".bfcode/sessions/recent_session.json",
+                serde_json::to_string(&recent).unwrap(),
+            )
+            .unwrap();
+
+            // With days=1, old session should be excluded
+            let result = run_stats_command(Some(1), None);
+            assert!(result.is_ok());
+        });
+    }
+
+    #[test]
+    fn test_stats_tool_limit() {
+        with_tmp(|| {
+            std::fs::create_dir_all(".bfcode/sessions").unwrap();
+
+            let mut s = ProjectSession::new();
+            s.id = "tool_test".into();
+            s.total_tokens = 100;
+
+            // Add tool calls to conversation
+            s.conversation.push(Message::assistant_tool_calls(vec![
+                types::ToolCall {
+                    id: "t1".into(),
+                    call_type: "function".into(),
+                    function: types::FunctionCall {
+                        name: "read_file".into(),
+                        arguments: "{}".into(),
+                    },
+                },
+                types::ToolCall {
+                    id: "t2".into(),
+                    call_type: "function".into(),
+                    function: types::FunctionCall {
+                        name: "write_file".into(),
+                        arguments: "{}".into(),
+                    },
+                },
+                types::ToolCall {
+                    id: "t3".into(),
+                    call_type: "function".into(),
+                    function: types::FunctionCall {
+                        name: "bash".into(),
+                        arguments: "{}".into(),
+                    },
+                },
+            ]));
+
+            std::fs::write(
+                ".bfcode/sessions/tool_test.json",
+                serde_json::to_string(&s).unwrap(),
+            )
+            .unwrap();
+
+            // Limit to top 2 tools
+            let result = run_stats_command(None, Some(2));
+            assert!(result.is_ok());
+        });
+    }
+
+    // ── /usage command ─────────────────────────────────────────────
+
+    #[test]
+    fn test_usage_command_returns_continue() {
+        with_tmp(|| {
+            let mut session = new_test_session();
+            let mut config = GlobalConfig::default();
+            let result = handle_command("/usage", &mut session, &mut config, "sys").unwrap();
+            assert!(matches!(result, CommandResult::Continue));
+        });
+    }
+
+    #[test]
+    fn test_usage_command_alias() {
+        with_tmp(|| {
+            let mut session = new_test_session();
+            let mut config = GlobalConfig::default();
+            let result = handle_command("/u", &mut session, &mut config, "sys").unwrap();
+            assert!(matches!(result, CommandResult::Continue));
+        });
+    }
+
+    #[test]
+    fn test_usage_command_with_cost_data() {
+        with_tmp(|| {
+            let mut session = new_test_session();
+            session.total_input_tokens = 5000;
+            session.total_output_tokens = 2000;
+            session.total_tokens = 7000;
+            session.total_cost = 0.025;
+            session.model = "gpt-4o".into();
+            let mut config = GlobalConfig::default();
+
+            let result = handle_command("/usage", &mut session, &mut config, "sys").unwrap();
+            assert!(matches!(result, CommandResult::Continue));
+        });
+    }
+
+    #[test]
+    fn test_usage_command_empty_model_shows_config_model() {
+        with_tmp(|| {
+            let mut session = new_test_session();
+            // session.model is empty by default
+            let mut config = GlobalConfig::default();
+            // The command should use config.model when session.model is empty
+            let result = handle_command("/usage", &mut session, &mut config, "sys").unwrap();
+            assert!(matches!(result, CommandResult::Continue));
+        });
+    }
+
+    #[test]
+    fn test_stats_model_usage_aggregation() {
+        with_tmp(|| {
+            std::fs::create_dir_all(".bfcode/sessions").unwrap();
+
+            let mut s1 = ProjectSession::new();
+            s1.id = "model_test_1".into();
+            s1.model = "gpt-4o".into();
+            s1.total_input_tokens = 500;
+            s1.total_output_tokens = 200;
+            s1.total_cost = 0.005;
+            s1.total_tokens = 700;
+
+            let mut s2 = ProjectSession::new();
+            s2.id = "model_test_2".into();
+            s2.model = "claude-sonnet-4-20250514".into();
+            s2.total_input_tokens = 800;
+            s2.total_output_tokens = 300;
+            s2.total_cost = 0.008;
+            s2.total_tokens = 1100;
+
+            let mut s3 = ProjectSession::new();
+            s3.id = "model_test_3".into();
+            s3.model = "gpt-4o".into();
+            s3.total_input_tokens = 600;
+            s3.total_output_tokens = 250;
+            s3.total_cost = 0.006;
+            s3.total_tokens = 850;
+
+            for s in [&s1, &s2, &s3] {
+                std::fs::write(
+                    format!(".bfcode/sessions/{}.json", s.id),
+                    serde_json::to_string(s).unwrap(),
+                )
+                .unwrap();
+            }
+
+            let result = run_stats_command(None, None);
+            assert!(result.is_ok());
+        });
+    }
 }

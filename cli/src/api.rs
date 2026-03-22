@@ -98,6 +98,13 @@ impl OpenAICompatibleClient {
             } else {
                 Some(tools.to_vec())
             },
+            stream_options: if stream {
+                Some(crate::types::StreamOptions {
+                    include_usage: true,
+                })
+            } else {
+                None
+            },
         }
     }
 
@@ -125,6 +132,9 @@ impl OpenAICompatibleClient {
             "stream": stream,
             "temperature": temperature,
         });
+        if stream {
+            obj["stream_options"] = serde_json::json!({"include_usage": true});
+        }
         if !tools.is_empty() {
             obj["tools"] = serde_json::to_value(tools).unwrap_or_default();
         }
