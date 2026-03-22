@@ -1,8 +1,8 @@
 use anyhow::Result;
 use crossterm::{
     event::{
-        self, Event, KeyCode, KeyEvent, KeyModifiers, KeyboardEnhancementFlags,
-        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyModifiers,
+        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
@@ -38,6 +38,8 @@ pub enum TuiAction {
     Quit,
     /// User entered a slash command.
     SlashCommand(String),
+    /// User pasted an image from clipboard.
+    ImagePaste,
 }
 
 // ---------------------------------------------------------------------------
@@ -82,6 +84,8 @@ pub struct App {
     stream_tick: u8,
     /// Whether to show the help overlay.
     show_help: bool,
+    /// Image path stored separately (not shown in input buffer).
+    pasted_image: Option<String>,
 }
 
 impl App {
@@ -106,6 +110,7 @@ impl App {
             streaming: false,
             stream_tick: 0,
             show_help: false,
+            pasted_image: None,
         }
     }
 
@@ -142,11 +147,21 @@ impl App {
                 self.input_history.push(text.clone());
             }
         }
+        // Prepend image path if an image was pasted
+        let final_text = if let Some(img) = self.pasted_image.take() {
+            if text.trim().is_empty() {
+                format!("{img} describe this image")
+            } else {
+                format!("{img} {text}")
+            }
+        } else {
+            text
+        };
         self.input.clear();
         self.cursor_pos = 0;
         self.history_index = -1;
         self.saved_input.clear();
-        text
+        final_text
     }
 
     /// Handle a key event and optionally return an action for the caller.
@@ -159,6 +174,22 @@ impl App {
             (KeyModifiers::CONTROL, KeyCode::Char('c')) | (_, KeyCode::Esc) => {
                 self.should_quit = true;
                 return Some(TuiAction::Quit);
+            }
+
+            // ----- Paste image (Ctrl+V) -----
+            (KeyModifiers::CONTROL, KeyCode::Char('v')) => {
+                if self.pasted_image.is_none() && clipboard_has_image() {
+                    self.pasted_image = Some("@clipboard".to_string());
+                    self.set_status("✓ image pasted — type your message and press Enter");
+                    return Some(TuiAction::ImagePaste);
+                } else if self.pasted_image.is_none() {
+                    // No image — paste text from clipboard
+                    if let Some(text) = clipboard_text() {
+                        self.input.insert_str(self.cursor_pos, &text);
+                        self.cursor_pos += text.len();
+                    }
+                }
+                // If image already pasted, ignore duplicate Ctrl+V
             }
 
             // ----- Clear screen -----
@@ -257,6 +288,36 @@ impl App {
         None
     }
 
+    /// Handle a bracketed paste event (Cmd+V sends text via terminal paste).
+    /// Returns Some(TuiAction::ImagePaste) if an image was detected.
+    pub fn handle_paste(&mut self, text: &str) -> Option<TuiAction> {
+        let trimmed = text.trim();
+
+        // macOS pastes clipboard images as temp file paths (e.g.
+        // /var/folders/.../clipboard-*.png) — store path separately
+        if self.pasted_image.is_none() && is_pasted_image_path(trimmed) {
+            self.pasted_image = Some(trimmed.to_string());
+            self.set_status("✓ image pasted — type your message and press Enter");
+            return Some(TuiAction::ImagePaste);
+        }
+
+        if trimmed.is_empty() && self.pasted_image.is_none() && clipboard_has_image() {
+            self.pasted_image = Some("@clipboard".to_string());
+            self.set_status("✓ image pasted — type your message and press Enter");
+            return Some(TuiAction::ImagePaste);
+        }
+        if self.pasted_image.is_some() && is_pasted_image_path(trimmed) {
+            // Duplicate image paste — ignore silently
+            return None;
+        }
+        if !text.is_empty() {
+            // Normal text paste
+            self.input.insert_str(self.cursor_pos, text);
+            self.cursor_pos += text.len();
+        }
+        None
+    }
+
     pub fn set_streaming(&mut self, streaming: bool) {
         self.streaming = streaming;
         self.stream_tick = 0;
@@ -319,6 +380,8 @@ pub fn init_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
         stdout,
         PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
     );
+    // Enable bracketed paste so Cmd+V paste events are captured as Event::Paste.
+    let _ = execute!(stdout, EnableBracketedPaste);
     let backend = CrosstermBackend::new(stdout);
     let terminal = Terminal::new(backend)?;
     Ok(terminal)
@@ -327,6 +390,7 @@ pub fn init_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
 /// Restore terminal to normal mode.
 pub fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
     terminal::disable_raw_mode()?;
+    let _ = execute!(terminal.backend_mut(), DisableBracketedPaste);
     let _ = execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags);
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
@@ -568,7 +632,11 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" Input (Enter=send, Shift+Enter=newline) ")
+                .title(if app.pasted_image.is_some() {
+                    " Input [image attached] (Enter=send) "
+                } else {
+                    " Input (Enter=send, Shift+Enter=newline, Ctrl+V=paste) "
+                })
                 .border_style(Style::default().fg(Color::Cyan)),
         )
         .wrap(Wrap { trim: false });
@@ -648,6 +716,10 @@ fn draw_help_overlay(f: &mut Frame, app: &App) {
             Span::raw("Toggle this help"),
         ]),
         Line::from(vec![
+            Span::styled("Ctrl+V       ", Style::default().fg(Color::Yellow)),
+            Span::raw("Paste image / text"),
+        ]),
+        Line::from(vec![
             Span::styled("Ctrl+C / Esc ", Style::default().fg(Color::Yellow)),
             Span::raw("Quit"),
         ]),
@@ -671,6 +743,35 @@ fn draw_help_overlay(f: &mut Frame, app: &App) {
         )
         .style(Style::default().bg(Color::Black));
     f.render_widget(help, popup_area);
+}
+
+// ---------------------------------------------------------------------------
+// Clipboard helpers
+// ---------------------------------------------------------------------------
+
+/// Check if a pasted string looks like an image file path (e.g. macOS pastes
+/// clipboard images as temp file paths like /var/folders/.../clipboard-*.png).
+fn is_pasted_image_path(text: &str) -> bool {
+    let image_extensions = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"];
+    let lower = text.to_lowercase();
+    let looks_like_image = image_extensions.iter().any(|ext| lower.ends_with(ext));
+    looks_like_image && std::path::Path::new(text).exists()
+}
+
+/// Check if the system clipboard contains an image.
+fn clipboard_has_image() -> bool {
+    use arboard::Clipboard;
+    Clipboard::new()
+        .ok()
+        .and_then(|mut cb| cb.get_image().ok())
+        .is_some()
+}
+
+/// Get text from the system clipboard, if available.
+fn clipboard_text() -> Option<String> {
+    use arboard::Clipboard;
+    let mut cb = Clipboard::new().ok()?;
+    cb.get_text().ok()
 }
 
 // ---------------------------------------------------------------------------

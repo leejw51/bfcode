@@ -16,6 +16,7 @@ dirs = "6"
 colored = "3"
 chrono = "0.4"
 arboard = "3"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 pdf-extract = "0.7"
 base64 = "0.22"
 ratatui = "0.29"

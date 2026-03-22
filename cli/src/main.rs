@@ -24,8 +24,8 @@ use clap::{Parser, Subcommand};
 use colored::Colorize;
 use crossterm::{
     event::{
-        self, Event, KeyCode, KeyEvent, KeyModifiers, KeyboardEnhancementFlags,
-        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyModifiers,
+        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute, terminal,
 };
@@ -1257,6 +1257,33 @@ async fn run_interactive(initial_message: Option<String>, oneshot: bool) -> Resu
             continue;
         }
 
+        // Detect pasted image file paths (macOS Cmd+V pastes paths like
+        // /var/folders/.../clipboard-*.png) — route to process_user_message
+        // instead of treating as slash command.
+        {
+            let first_word = input.split_whitespace().next().unwrap_or("");
+            if is_pasted_image_path(first_word) {
+                let rest = input[first_word.len()..].trim();
+                let prompt = if rest.is_empty() {
+                    "describe this image"
+                } else {
+                    rest
+                };
+                let paste_input = format!("{first_word} {prompt}");
+                process_user_message(
+                    &paste_input,
+                    &mut session,
+                    &mut config,
+                    &full_system_prompt,
+                    client.as_ref(),
+                    &tool_defs,
+                    &permissions,
+                )
+                .await?;
+                continue;
+            }
+        }
+
         // Handle slash commands
         if input.starts_with('/') {
             // Handle /paste specially (needs async for process_user_message)
@@ -1321,8 +1348,11 @@ fn read_input_line() -> Result<Option<String>> {
         stdout,
         PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
     );
+    let _ = execute!(stdout, EnableBracketedPaste);
 
     let mut buf = String::new();
+    // Image path stored separately so it doesn't clutter the visible input
+    let mut image_path: Option<String> = None;
 
     let result = loop {
         match event::read() {
@@ -1332,6 +1362,22 @@ fn read_input_line() -> Result<Option<String>> {
                 // Ctrl+C / Ctrl+D → EOF
                 (KeyModifiers::CONTROL, KeyCode::Char('c' | 'd')) => {
                     break Ok(None);
+                }
+                // Ctrl+V — check clipboard for image
+                (KeyModifiers::CONTROL, KeyCode::Char('v')) => {
+                    if image_path.is_none() && clipboard_has_image() {
+                        image_path = Some("@clipboard".to_string());
+                        write!(stdout, "\r\n  {} {}\r\n> {}", "✓".green(), "image pasted".green(), buf)?;
+                        stdout.flush()?;
+                    } else if image_path.is_none() {
+                        // No image — paste text from clipboard if available
+                        if let Some(text) = clipboard_text() {
+                            buf.push_str(&text);
+                            write!(stdout, "{text}")?;
+                            stdout.flush()?;
+                        }
+                    }
+                    // If image already pasted, ignore duplicate Ctrl+V
                 }
                 // Shift+Enter → newline
                 (KeyModifiers::SHIFT, KeyCode::Enter) => {
@@ -1343,17 +1389,24 @@ fn read_input_line() -> Result<Option<String>> {
                 (_, KeyCode::Enter) => {
                     write!(stdout, "\r\n")?;
                     stdout.flush()?;
-                    break Ok(Some(buf));
+                    // Prepend image path to user text if an image was pasted
+                    let final_buf = if let Some(img) = image_path.take() {
+                        if buf.trim().is_empty() {
+                            format!("{img} describe this image")
+                        } else {
+                            format!("{img} {buf}")
+                        }
+                    } else {
+                        buf
+                    };
+                    break Ok(Some(final_buf));
                 }
                 // Backspace
                 (_, KeyCode::Backspace) => {
                     if let Some(ch) = buf.pop() {
                         if ch == '\n' {
-                            // Went back a line — redraw is complex, just show simple feedback
                             write!(stdout, "\r\n")?;
-                            // Re-print everything
                             write!(stdout, "\r")?;
-                            // Clear and reprint — simplified: just note the deletion
                         } else {
                             write!(stdout, "\x08 \x08")?;
                             stdout.flush()?;
@@ -1368,11 +1421,36 @@ fn read_input_line() -> Result<Option<String>> {
                 }
                 _ => {}
             },
+            // Bracketed paste — terminal sends pasted text as a single event.
+            // On macOS, Cmd+V with a clipboard image often pastes a temp file path
+            // like /var/folders/.../clipboard-*.png
+            Ok(Event::Paste(text)) => {
+                let trimmed = text.trim();
+                if image_path.is_none() && is_pasted_image_path(trimmed) {
+                    // macOS pasted an image file path — store it separately
+                    image_path = Some(trimmed.to_string());
+                    write!(stdout, "\r\n  {} {}\r\n> {}", "✓".green(), "image pasted".green(), buf)?;
+                    stdout.flush()?;
+                } else if trimmed.is_empty() && image_path.is_none() && clipboard_has_image() {
+                    // Empty paste but clipboard has image
+                    image_path = Some("@clipboard".to_string());
+                    write!(stdout, "\r\n  {} {}\r\n> {}", "✓".green(), "image pasted".green(), buf)?;
+                    stdout.flush()?;
+                } else if image_path.is_some() && is_pasted_image_path(trimmed) {
+                    // Duplicate image paste — ignore silently
+                } else if !text.is_empty() {
+                    // Normal text paste
+                    buf.push_str(&text);
+                    write!(stdout, "{text}")?;
+                    stdout.flush()?;
+                }
+            }
             Ok(_) => {} // ignore resize, mouse, etc.
             Err(e) => break Err(anyhow::anyhow!("input error: {e}")),
         }
     };
 
+    let _ = execute!(stdout, DisableBracketedPaste);
     let _ = execute!(stdout, PopKeyboardEnhancementFlags);
     terminal::disable_raw_mode()?;
     result
@@ -2049,16 +2127,41 @@ fn extract_images(input: &str) -> (String, Vec<types::ImageAttachment>) {
     (clean_text, images)
 }
 
+/// Check if a pasted string looks like an image file path (e.g. macOS pastes
+/// clipboard images as temp file paths like /var/folders/.../clipboard-*.png).
+fn is_pasted_image_path(text: &str) -> bool {
+    let image_extensions = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"];
+    let lower = text.to_lowercase();
+    let looks_like_image = image_extensions.iter().any(|ext| lower.ends_with(ext));
+    looks_like_image && std::path::Path::new(text).exists()
+}
+
+/// Check if the system clipboard contains an image.
+fn clipboard_has_image() -> bool {
+    use arboard::Clipboard;
+    Clipboard::new()
+        .ok()
+        .and_then(|mut cb| cb.get_image().ok())
+        .is_some()
+}
+
+/// Get text from the system clipboard, if available.
+fn clipboard_text() -> Option<String> {
+    use arboard::Clipboard;
+    let mut cb = Clipboard::new().ok()?;
+    cb.get_text().ok()
+}
+
 /// Grab image from system clipboard using arboard.
 /// Returns None if no image is available.
 fn grab_clipboard_image() -> Option<types::ImageAttachment> {
     use arboard::Clipboard;
 
     let mut clipboard = Clipboard::new().ok()?;
-    let image = clipboard.get_image().ok()?;
+    let img = clipboard.get_image().ok()?;
 
-    // Convert RGBA pixels to PNG
-    let png_data = encode_rgba_to_png(&image.bytes, image.width as u32, image.height as u32)?;
+    // Convert RGBA pixels to PNG using the image crate
+    let png_data = encode_rgba_to_png(&img.bytes, img.width as u32, img.height as u32)?;
 
     let base64_data = base64_encode(&png_data);
     Some(types::ImageAttachment {
@@ -2067,135 +2170,19 @@ fn grab_clipboard_image() -> Option<types::ImageAttachment> {
     })
 }
 
-/// Encode raw RGBA pixel data to PNG format (minimal encoder)
+/// Encode raw RGBA pixel data to PNG format using the image crate.
 fn encode_rgba_to_png(rgba: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
-    // Use a simple uncompressed PNG encoder
-    // PNG format: signature + IHDR + IDAT (zlib deflate stored) + IEND
+    use image::{ImageBuffer, Rgba};
+    use std::io::Cursor;
 
-    let mut out = Vec::new();
-
-    // PNG signature
-    out.extend_from_slice(&[137, 80, 78, 71, 13, 10, 26, 10]);
-
-    // IHDR chunk
-    let mut ihdr = Vec::new();
-    ihdr.extend_from_slice(&width.to_be_bytes());
-    ihdr.extend_from_slice(&height.to_be_bytes());
-    ihdr.push(8); // bit depth
-    ihdr.push(6); // color type: RGBA
-    ihdr.push(0); // compression
-    ihdr.push(0); // filter
-    ihdr.push(0); // interlace
-    write_png_chunk(&mut out, b"IHDR", &ihdr);
-
-    // IDAT chunk — build raw scanlines with filter byte 0 (None)
-    let mut raw_data = Vec::with_capacity((width as usize * 4 + 1) * height as usize);
-    for y in 0..height as usize {
-        raw_data.push(0); // filter: None
-        let row_start = y * width as usize * 4;
-        let row_end = row_start + width as usize * 4;
-        if row_end <= rgba.len() {
-            raw_data.extend_from_slice(&rgba[row_start..row_end]);
-        } else {
-            // Pad with zeros if data is short
-            let available = rgba.len().saturating_sub(row_start);
-            if available > 0 {
-                raw_data.extend_from_slice(&rgba[row_start..row_start + available]);
-            }
-            raw_data.resize(raw_data.len() + width as usize * 4 - available, 0);
-        }
-    }
-
-    // Compress with zlib (deflate stored blocks)
-    let compressed = zlib_compress_stored(&raw_data);
-    write_png_chunk(&mut out, b"IDAT", &compressed);
-
-    // IEND chunk
-    write_png_chunk(&mut out, b"IEND", &[]);
-
-    Some(out)
+    let img_buf: ImageBuffer<Rgba<u8>, _> =
+        ImageBuffer::from_raw(width, height, rgba.to_vec())?;
+    let mut png_bytes = Vec::new();
+    img_buf
+        .write_to(&mut Cursor::new(&mut png_bytes), image::ImageFormat::Png)
+        .ok()?;
+    Some(png_bytes)
 }
-
-/// Write a PNG chunk: length(4) + type(4) + data + crc(4)
-fn write_png_chunk(out: &mut Vec<u8>, chunk_type: &[u8; 4], data: &[u8]) {
-    out.extend_from_slice(&(data.len() as u32).to_be_bytes());
-    out.extend_from_slice(chunk_type);
-    out.extend_from_slice(data);
-    let crc = png_crc32(chunk_type, data);
-    out.extend_from_slice(&crc.to_be_bytes());
-}
-
-/// CRC32 for PNG (type + data)
-fn png_crc32(chunk_type: &[u8], data: &[u8]) -> u32 {
-    let mut crc: u32 = 0xFFFFFFFF;
-    for &byte in chunk_type.iter().chain(data.iter()) {
-        let idx = ((crc ^ byte as u32) & 0xFF) as usize;
-        crc = CRC32_TABLE[idx] ^ (crc >> 8);
-    }
-    crc ^ 0xFFFFFFFF
-}
-
-/// Zlib wrapper around stored (uncompressed) deflate blocks
-fn zlib_compress_stored(data: &[u8]) -> Vec<u8> {
-    let mut out = Vec::new();
-    // Zlib header: CMF=0x78 (deflate, window=32K), FLG=0x01 (no dict, check bits)
-    out.push(0x78);
-    out.push(0x01);
-
-    // Deflate stored blocks (max 65535 bytes each)
-    let mut offset = 0;
-    while offset < data.len() {
-        let remaining = data.len() - offset;
-        let block_size = remaining.min(65535);
-        let is_last = offset + block_size >= data.len();
-
-        out.push(if is_last { 0x01 } else { 0x00 }); // BFINAL + BTYPE=00 (stored)
-        let len = block_size as u16;
-        out.extend_from_slice(&len.to_le_bytes());
-        out.extend_from_slice(&(!len).to_le_bytes()); // NLEN
-        out.extend_from_slice(&data[offset..offset + block_size]);
-
-        offset += block_size;
-    }
-
-    // Adler32 checksum
-    let adler = adler32(data);
-    out.extend_from_slice(&adler.to_be_bytes());
-
-    out
-}
-
-/// Adler-32 checksum
-fn adler32(data: &[u8]) -> u32 {
-    let mut a: u32 = 1;
-    let mut b: u32 = 0;
-    for &byte in data {
-        a = (a + byte as u32) % 65521;
-        b = (b + a) % 65521;
-    }
-    (b << 16) | a
-}
-
-/// CRC32 lookup table for PNG
-const CRC32_TABLE: [u32; 256] = {
-    let mut table = [0u32; 256];
-    let mut n = 0;
-    while n < 256 {
-        let mut c = n as u32;
-        let mut k = 0;
-        while k < 8 {
-            if c & 1 != 0 {
-                c = 0xEDB88320 ^ (c >> 1);
-            } else {
-                c >>= 1;
-            }
-            k += 1;
-        }
-        table[n] = c;
-        n += 1;
-    }
-    table
-};
 
 /// Base64 encode bytes (no external dep needed — use simple encoder)
 fn base64_encode(data: &[u8]) -> String {
@@ -2917,24 +2904,6 @@ mod tests {
     // ── PNG encoder helpers ─────────────────────────────────────────
 
     #[test]
-    fn test_adler32_empty() {
-        assert_eq!(adler32(&[]), 1);
-    }
-
-    #[test]
-    fn test_adler32_known() {
-        // adler32("Wikipedia") = 0x11E60398
-        assert_eq!(adler32(b"Wikipedia"), 0x11E60398);
-    }
-
-    #[test]
-    fn test_png_crc32() {
-        // CRC of IHDR type + known data should be deterministic
-        let crc = png_crc32(b"IEND", &[]);
-        assert_ne!(crc, 0);
-    }
-
-    #[test]
     fn test_encode_rgba_to_png_valid_header() {
         // 1x1 red pixel RGBA
         let rgba = vec![255, 0, 0, 255];
@@ -2952,20 +2921,16 @@ mod tests {
         let png = encode_rgba_to_png(&rgba, 2, 2).unwrap();
         assert!(png.len() > 50); // Should be a reasonable size
         // Should contain IHDR, IDAT, IEND
-        let png_str = String::from_utf8_lossy(&png);
         assert!(png.windows(4).any(|w| w == b"IHDR"));
         assert!(png.windows(4).any(|w| w == b"IDAT"));
         assert!(png.windows(4).any(|w| w == b"IEND"));
-        let _ = png_str; // avoid unused warning
     }
 
     #[test]
-    fn test_zlib_compress_stored_has_header() {
-        let data = b"hello world";
-        let compressed = zlib_compress_stored(data);
-        // Zlib header: 0x78 0x01
-        assert_eq!(compressed[0], 0x78);
-        assert_eq!(compressed[1], 0x01);
+    fn test_is_pasted_image_path_nonexistent() {
+        assert!(!is_pasted_image_path("/nonexistent/path.png"));
+        assert!(!is_pasted_image_path("not-an-image.txt"));
+        assert!(!is_pasted_image_path(""));
     }
 
     // ── Compact with structured summary ──────────────────────────────

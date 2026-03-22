@@ -3620,6 +3620,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_tool_oneshot_allows_write() {
+        let _lock = AGENT_MODE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_agent_mode(AgentMode::Build);
         let dir = std::env::temp_dir().join("bfcode_test_oneshot_write");
         let _ = std::fs::create_dir_all(&dir);
         let file = dir.join("oneshot.txt");
