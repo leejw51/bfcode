@@ -9,6 +9,7 @@ mod doctor;
 mod fallback;
 mod gateway;
 mod guard;
+mod lsp;
 mod persistence;
 mod plugin;
 mod search;
@@ -1367,7 +1368,13 @@ fn read_input_line() -> Result<Option<String>> {
                 (KeyModifiers::CONTROL, KeyCode::Char('v')) => {
                     if image_path.is_none() && clipboard_has_image() {
                         image_path = Some("@clipboard".to_string());
-                        write!(stdout, "\r\n  {} {}\r\n> {}", "✓".green(), "image pasted".green(), buf)?;
+                        write!(
+                            stdout,
+                            "\r\n  {} {}\r\n> {}",
+                            "✓".green(),
+                            "image pasted".green(),
+                            buf
+                        )?;
                         stdout.flush()?;
                     } else if image_path.is_none() {
                         // No image — paste text from clipboard if available
@@ -1429,12 +1436,24 @@ fn read_input_line() -> Result<Option<String>> {
                 if image_path.is_none() && is_pasted_image_path(trimmed) {
                     // macOS pasted an image file path — store it separately
                     image_path = Some(trimmed.to_string());
-                    write!(stdout, "\r\n  {} {}\r\n> {}", "✓".green(), "image pasted".green(), buf)?;
+                    write!(
+                        stdout,
+                        "\r\n  {} {}\r\n> {}",
+                        "✓".green(),
+                        "image pasted".green(),
+                        buf
+                    )?;
                     stdout.flush()?;
                 } else if trimmed.is_empty() && image_path.is_none() && clipboard_has_image() {
                     // Empty paste but clipboard has image
                     image_path = Some("@clipboard".to_string());
-                    write!(stdout, "\r\n  {} {}\r\n> {}", "✓".green(), "image pasted".green(), buf)?;
+                    write!(
+                        stdout,
+                        "\r\n  {} {}\r\n> {}",
+                        "✓".green(),
+                        "image pasted".green(),
+                        buf
+                    )?;
                     stdout.flush()?;
                 } else if image_path.is_some() && is_pasted_image_path(trimmed) {
                     // Duplicate image paste — ignore silently
@@ -2175,8 +2194,7 @@ fn encode_rgba_to_png(rgba: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
     use image::{ImageBuffer, Rgba};
     use std::io::Cursor;
 
-    let img_buf: ImageBuffer<Rgba<u8>, _> =
-        ImageBuffer::from_raw(width, height, rgba.to_vec())?;
+    let img_buf: ImageBuffer<Rgba<u8>, _> = ImageBuffer::from_raw(width, height, rgba.to_vec())?;
     let mut png_bytes = Vec::new();
     img_buf
         .write_to(&mut Cursor::new(&mut png_bytes), image::ImageFormat::Png)

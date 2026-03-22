@@ -80,6 +80,7 @@ pub async fn run_doctor() -> Vec<CheckResult> {
         check_sessions(),
         check_memories(),
         check_skills(),
+        check_lsp_servers(),
     ];
     results.extend(sync_checks);
 
@@ -107,6 +108,7 @@ pub async fn run_check(name: &str) -> Option<CheckResult> {
         "sessions" => Some(check_sessions()),
         "memories" | "memory" => Some(check_memories()),
         "skills" => Some(check_skills()),
+        "lsp" => Some(check_lsp_servers()),
         "network" => Some(check_network().await),
         _ => None,
     }
@@ -711,6 +713,56 @@ fn check_skills() -> CheckResult {
             status: CheckStatus::Pass,
             message: format!("{} skill(s) loaded", skills.len()),
             details: Some(names.join(", ")),
+        }
+    }
+}
+
+/// Check: LSP language servers.
+fn check_lsp_servers() -> CheckResult {
+    let servers = crate::lsp::check_lsp_servers();
+    let installed: Vec<_> = servers.iter().filter(|(_, found, _)| *found).collect();
+    let missing: Vec<_> = servers.iter().filter(|(_, found, _)| !*found).collect();
+
+    if installed.is_empty() {
+        CheckResult {
+            name: "lsp".into(),
+            status: CheckStatus::Warn,
+            message: "no LSP servers found".into(),
+            details: Some(
+                missing
+                    .iter()
+                    .map(|(name, _, hint)| format!("  {name}: {hint}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+        }
+    } else {
+        let names: Vec<_> = installed.iter().map(|(n, _, _)| n.as_str()).collect();
+        let mut msg = format!(
+            "{}/{} installed ({})",
+            installed.len(),
+            servers.len(),
+            names.join(", ")
+        );
+        if !missing.is_empty() {
+            msg.push_str(&format!(
+                "\n{}",
+                missing
+                    .iter()
+                    .map(|(name, _, hint)| format!("    {name}: {hint}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ));
+        }
+        CheckResult {
+            name: "lsp".into(),
+            status: if missing.is_empty() {
+                CheckStatus::Pass
+            } else {
+                CheckStatus::Warn
+            },
+            message: msg,
+            details: None,
         }
     }
 }

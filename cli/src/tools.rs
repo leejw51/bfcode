@@ -487,6 +487,29 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                 }),
             },
         },
+        // --- LSP Tool ---
+        ToolDefinition {
+            tool_type: "function".into(),
+            function: FunctionSchema {
+                name: "lsp".into(),
+                description: "Code intelligence via Language Server Protocol. Supports Rust (rust-analyzer), Go (gopls), and TypeScript/JavaScript (typescript-language-server). Operations: goToDefinition, findReferences, hover, documentSymbol, workspaceSymbol. Line and character are 1-based.".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "operation": {
+                            "type": "string",
+                            "enum": ["goToDefinition", "findReferences", "hover", "documentSymbol", "workspaceSymbol"],
+                            "description": "LSP operation to perform"
+                        },
+                        "filePath": {"type": "string", "description": "File path (absolute or relative)"},
+                        "line": {"type": "integer", "description": "Line number (1-based). Required for goToDefinition, findReferences, hover."},
+                        "character": {"type": "integer", "description": "Column number (1-based). Required for goToDefinition, findReferences, hover."},
+                        "query": {"type": "string", "description": "Search query for workspaceSymbol. Optional."}
+                    },
+                    "required": ["operation", "filePath"]
+                }),
+            },
+        },
     ];
 
     // Conditionally add tools that require API keys
@@ -651,6 +674,7 @@ async fn execute_tool_inner(
                     | "glob"
                     | "grep"
                     | "list_files"
+                    | "lsp"
                     | "webfetch"
                     | "websearch"
                     | "memory_list"
@@ -766,6 +790,7 @@ async fn execute_tool_inner(
         "todoread" => exec_todoread(session_id).await,
         "plan_enter" => exec_plan_enter(arguments).await,
         "plan_exit" => exec_plan_exit().await,
+        "lsp" => crate::lsp::execute(arguments).await,
         _ => Err(anyhow::anyhow!("Unknown tool: {name}")),
     };
 
