@@ -1416,10 +1416,7 @@ content
             assert_eq!(forked.parent_id, Some(session.id.clone()));
             assert_eq!(forked.title, "Original session (fork #1)");
             assert_eq!(forked.conversation.len(), 4);
-            assert_eq!(
-                forked.conversation[1].content.as_deref(),
-                Some("hello")
-            );
+            assert_eq!(forked.conversation[1].content.as_deref(), Some("hello"));
 
             // Verify the forked session was saved to disk
             let loaded = switch_session(&forked.id).unwrap();
@@ -1438,13 +1435,9 @@ content
             session.title = "Test session".into();
             session.conversation.push(Message::system("sys"));
             session.conversation.push(Message::user("msg1"));
-            session
-                .conversation
-                .push(Message::assistant_text("reply1"));
+            session.conversation.push(Message::assistant_text("reply1"));
             session.conversation.push(Message::user("msg2"));
-            session
-                .conversation
-                .push(Message::assistant_text("reply2"));
+            session.conversation.push(Message::assistant_text("reply2"));
             save_session(&session).unwrap();
 
             // Fork at index 3 — copies messages [0..3]
@@ -1453,10 +1446,7 @@ content
             assert_eq!(forked.conversation.len(), 3);
             assert_eq!(forked.conversation[0].content.as_deref(), Some("sys"));
             assert_eq!(forked.conversation[1].content.as_deref(), Some("msg1"));
-            assert_eq!(
-                forked.conversation[2].content.as_deref(),
-                Some("reply1")
-            );
+            assert_eq!(forked.conversation[2].content.as_deref(), Some("reply1"));
             assert_eq!(forked.parent_id, Some(session.id.clone()));
         });
         let _ = std::fs::remove_dir_all(&tmp);

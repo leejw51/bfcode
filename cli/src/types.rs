@@ -658,8 +658,8 @@ impl ProjectSession {
 
         // Copy messages up to the fork point
         let end = message_index.unwrap_or(self.conversation.len());
-        let conversation: Vec<Message> = self.conversation[..end.min(self.conversation.len())]
-            .to_vec();
+        let conversation: Vec<Message> =
+            self.conversation[..end.min(self.conversation.len())].to_vec();
 
         // Rough token estimate (~4 chars per token, matching context.rs heuristic)
         let total_tokens = conversation

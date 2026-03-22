@@ -15,6 +15,7 @@ mod persistence;
 mod plugin;
 mod search;
 mod skill;
+mod telegram;
 #[cfg(test)]
 mod test_utils;
 mod tools;
@@ -136,6 +137,9 @@ enum Commands {
     /// Initialize or show enhanced configuration
     #[command(subcommand)]
     Cfg(CfgCommands),
+
+    /// Start Telegram bot (requires TELEGRAM_BOT_TOKEN env var)
+    Telegram,
 }
 
 #[derive(Subcommand)]
@@ -398,6 +402,7 @@ async fn main() -> Result<()> {
         Some(Commands::Mcp(cmd)) => run_mcp_command(cmd).await,
         Some(Commands::Plugin(cmd)) => run_plugin_command(cmd),
         Some(Commands::Cfg(cmd)) => run_cfg_command(cmd),
+        Some(Commands::Telegram) => telegram::run_telegram_bot().await,
     }
 }
 
