@@ -10,6 +10,7 @@ mod fallback;
 mod gateway;
 mod guard;
 mod lsp;
+mod mcp;
 mod persistence;
 mod plugin;
 mod search;
@@ -124,9 +125,21 @@ enum Commands {
     /// Show system diagnostics info
     Diagnostics,
 
+    /// Manage MCP (Model Context Protocol) servers
+    #[command(subcommand)]
+    Mcp(McpCommands),
+
     /// Initialize or show enhanced configuration
     #[command(subcommand)]
     Cfg(CfgCommands),
+}
+
+#[derive(Subcommand)]
+enum McpCommands {
+    /// List configured MCP servers and their status
+    List,
+    /// Show tools available from connected MCP servers
+    Tools,
 }
 
 #[derive(Subcommand)]
@@ -352,11 +365,77 @@ async fn main() -> Result<()> {
         Some(Commands::Daemon(cmd)) => run_daemon_command(cmd).await,
         Some(Commands::Doctor) => run_doctor_command().await,
         Some(Commands::Diagnostics) => run_diagnostics_command(),
+        Some(Commands::Mcp(cmd)) => run_mcp_command(cmd).await,
         Some(Commands::Cfg(cmd)) => run_cfg_command(cmd),
     }
 }
 
 // --- Subcommand handlers ---
+
+async fn run_mcp_command(cmd: McpCommands) -> Result<()> {
+    let config = config::load_full_config()?;
+    if config.mcp_servers.is_empty() {
+        println!("No MCP servers configured.");
+        println!();
+        println!("Add MCP servers to your config.json:");
+        println!(
+            "  {}",
+            r#""mcp_servers": {
+    "my-server": {
+      "type": "local",
+      "command": ["npx", "-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+    }
+  }"#
+        );
+        return Ok(());
+    }
+
+    match cmd {
+        McpCommands::List => {
+            println!("{}", "MCP Servers:".bold());
+            for (name, server) in &config.mcp_servers {
+                let status = if server.is_enabled() {
+                    "enabled"
+                } else {
+                    "disabled"
+                };
+                let kind = match server {
+                    mcp::McpServerConfig::Local { command, .. } => {
+                        format!("local ({})", command.join(" "))
+                    }
+                    mcp::McpServerConfig::Remote { url, .. } => {
+                        format!("remote ({url})")
+                    }
+                };
+                let icon = if server.is_enabled() {
+                    "●".green()
+                } else {
+                    "○".dimmed()
+                };
+                println!("  {icon} {}: {} [{}]", name.cyan(), kind, status);
+            }
+        }
+        McpCommands::Tools => {
+            println!("Connecting to MCP servers...");
+            let manager = mcp::McpManager::connect_all(&config.mcp_servers).await;
+            let defs = manager.get_tool_definitions();
+            if defs.is_empty() {
+                println!("No tools available from MCP servers.");
+            } else {
+                println!("\n{} ({} tools):", "MCP Tools".bold(), defs.len());
+                for def in &defs {
+                    println!(
+                        "  {} — {}",
+                        def.function.name.cyan(),
+                        def.function.description.dimmed()
+                    );
+                }
+            }
+            manager.shutdown_all().await;
+        }
+    }
+    Ok(())
+}
 
 fn run_session_command(cmd: SessionCommands) -> Result<()> {
     match cmd {
@@ -1172,7 +1251,33 @@ async fn run_interactive(initial_message: Option<String>, oneshot: bool) -> Resu
             &config.fallback_models,
         )?)
     };
-    let tool_defs = tools::get_tool_definitions();
+    let mut tool_defs = tools::get_tool_definitions();
+
+    // Initialize MCP servers from config
+    let full_config = config::load_full_config().unwrap_or_else(|_| config::FullConfig {
+        model: config.model.clone(),
+        temperature: config.temperature,
+        provider: format!("{}", types::detect_provider(&config.model)),
+        gateway: None,
+        daemon: None,
+        hooks: Vec::new(),
+        env: std::collections::HashMap::new(),
+        include: Vec::new(),
+        fallback_models: Vec::new(),
+        mcp_servers: std::collections::HashMap::new(),
+        config_version: 2,
+    });
+
+    if !full_config.mcp_servers.is_empty() {
+        if !oneshot {
+            eprintln!("{}", "MCP servers:".dimmed());
+        }
+        let mcp_manager = mcp::McpManager::connect_all(&full_config.mcp_servers).await;
+        let mcp_tools = mcp_manager.get_tool_definitions();
+        tool_defs.extend(mcp_tools);
+        tools::set_mcp_manager(mcp_manager).await;
+    }
+
     let permissions = if oneshot {
         tools::Permissions::new_auto_approve()
     } else {
@@ -1335,6 +1440,9 @@ async fn run_interactive(initial_message: Option<String>, oneshot: bool) -> Resu
         )
         .await?;
     }
+
+    // Shutdown MCP servers
+    tools::shutdown_mcp().await;
 
     Ok(())
 }

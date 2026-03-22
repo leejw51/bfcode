@@ -42,6 +42,10 @@ pub struct FullConfig {
     #[serde(default)]
     pub fallback_models: Vec<String>,
 
+    /// MCP (Model Context Protocol) servers.
+    #[serde(default)]
+    pub mcp_servers: HashMap<String, crate::mcp::McpServerConfig>,
+
     /// Schema version used for automatic migration.
     #[serde(default = "default_version")]
     pub config_version: u32,

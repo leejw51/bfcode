@@ -1,3 +1,4 @@
+use crate::mcp::McpManager;
 use crate::types::*;
 use anyhow::{Context, Result, bail, ensure};
 use colored::Colorize;
@@ -9,6 +10,33 @@ use std::time::Duration;
 /// Session-scoped todo list (thread-safe, keyed by session_id)
 static SESSION_TODOS: std::sync::LazyLock<Mutex<std::collections::HashMap<String, Vec<TodoItem>>>> =
     std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+/// Global MCP manager (set once during startup)
+static MCP_MANAGER: std::sync::LazyLock<tokio::sync::Mutex<Option<McpManager>>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(None));
+
+/// Initialize the global MCP manager.
+pub async fn set_mcp_manager(manager: McpManager) {
+    let mut guard = MCP_MANAGER.lock().await;
+    *guard = Some(manager);
+}
+
+/// Get MCP tool definitions from the global manager.
+pub async fn get_mcp_tool_definitions() -> Vec<ToolDefinition> {
+    let guard = MCP_MANAGER.lock().await;
+    match &*guard {
+        Some(manager) => manager.get_tool_definitions(),
+        None => Vec::new(),
+    }
+}
+
+/// Shutdown all MCP servers.
+pub async fn shutdown_mcp() {
+    let guard = MCP_MANAGER.lock().await;
+    if let Some(manager) = &*guard {
+        manager.shutdown_all().await;
+    }
+}
 
 /// Agent mode — determines which tools are available
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -746,7 +774,7 @@ async fn execute_tool_inner(
             | "browser_evaluate"
             | "image_generate"
             | "tts"
-    );
+    ) || name.starts_with("mcp_");
     if needs_permission {
         let summary = tool_permission_summary(name, arguments);
         match permissions.ask_permission(name, &summary) {
@@ -791,6 +819,14 @@ async fn execute_tool_inner(
         "plan_enter" => exec_plan_enter(arguments).await,
         "plan_exit" => exec_plan_exit().await,
         "lsp" => crate::lsp::execute(arguments).await,
+        _ if name.starts_with("mcp_") => {
+            // Dispatch to MCP manager
+            let guard = MCP_MANAGER.lock().await;
+            match &*guard {
+                Some(manager) => manager.execute_tool(name, arguments).await,
+                None => Err(anyhow::anyhow!("MCP not initialized")),
+            }
+        }
         _ => Err(anyhow::anyhow!("Unknown tool: {name}")),
     };
 
