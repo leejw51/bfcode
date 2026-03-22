@@ -129,6 +129,10 @@ enum Commands {
     #[command(subcommand)]
     Mcp(McpCommands),
 
+    /// Manage plugins and hooks
+    #[command(subcommand)]
+    Plugin(PluginCommands),
+
     /// Initialize or show enhanced configuration
     #[command(subcommand)]
     Cfg(CfgCommands),
@@ -140,6 +144,19 @@ enum McpCommands {
     List,
     /// Show tools available from connected MCP servers
     Tools,
+}
+
+#[derive(Subcommand)]
+enum PluginCommands {
+    /// List loaded plugins and their tools/hooks
+    List,
+    /// List configured hooks
+    Hooks,
+    /// Create a new plugin scaffold in .bfcode/plugins/
+    Init {
+        /// Plugin name
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -366,6 +383,7 @@ async fn main() -> Result<()> {
         Some(Commands::Doctor) => run_doctor_command().await,
         Some(Commands::Diagnostics) => run_diagnostics_command(),
         Some(Commands::Mcp(cmd)) => run_mcp_command(cmd).await,
+        Some(Commands::Plugin(cmd)) => run_plugin_command(cmd),
         Some(Commands::Cfg(cmd)) => run_cfg_command(cmd),
     }
 }
@@ -432,6 +450,168 @@ async fn run_mcp_command(cmd: McpCommands) -> Result<()> {
                 }
             }
             manager.shutdown_all().await;
+        }
+    }
+    Ok(())
+}
+
+fn run_plugin_command(cmd: PluginCommands) -> Result<()> {
+    match cmd {
+        PluginCommands::List => {
+            let plugin_mgr = plugin::PluginManager::load();
+            let plugins = plugin_mgr.list_plugins();
+            if plugins.is_empty() {
+                println!("No plugins loaded.");
+                println!();
+                println!(
+                    "Create a plugin with: {} init <name>",
+                    "bfcode plugin".yellow()
+                );
+                println!("Plugins are loaded from:");
+                println!("  .bfcode/plugins/<name>/plugin.json  (project)");
+                println!("  ~/.bfcode/plugins/<name>/plugin.json (global)");
+            } else {
+                print!("{}", plugin_mgr.status_report());
+            }
+        }
+        PluginCommands::Hooks => {
+            let hook_mgr = plugin::HookManager::load();
+            let plugin_mgr = plugin::PluginManager::load();
+            let mut all_hooks: Vec<&plugin::HookConfig> = hook_mgr.list_hooks().iter().collect();
+
+            // Also show hooks from plugins
+            let plugin_hooks = plugin_mgr.get_hook_configs();
+
+            if all_hooks.is_empty() && plugin_hooks.is_empty() {
+                println!("No hooks configured.");
+                println!();
+                println!("Add hooks to your config.json:");
+                println!(
+                    "  {}",
+                    r#""hooks": [
+    {"type": "session_start", "command": "echo Starting session"},
+    {"type": "tool_before", "command": "echo Running $BFCODE_TOOL_NAME", "pattern": "bash*"}
+  ]"#
+                );
+            } else {
+                println!("{}", "Configured Hooks:".bold());
+                for hook in &all_hooks {
+                    let status = if hook.enabled {
+                        "●".green().to_string()
+                    } else {
+                        "○".dimmed().to_string()
+                    };
+                    let pattern = hook
+                        .pattern
+                        .as_deref()
+                        .map(|p| format!(" [pattern: {p}]"))
+                        .unwrap_or_default();
+                    println!(
+                        "  {status} {} — {}{pattern}",
+                        hook.hook_type.to_string().cyan(),
+                        hook.command.dimmed()
+                    );
+                }
+                if !plugin_hooks.is_empty() {
+                    println!("\n{}", "Plugin Hooks:".bold());
+                    for hook in &plugin_hooks {
+                        let pattern = hook
+                            .pattern
+                            .as_deref()
+                            .map(|p| format!(" [pattern: {p}]"))
+                            .unwrap_or_default();
+                        println!(
+                            "  {} {} — {}{pattern}",
+                            "●".green(),
+                            hook.hook_type.to_string().cyan(),
+                            hook.description.dimmed()
+                        );
+                    }
+                }
+            }
+        }
+        PluginCommands::Init { name } => {
+            let plugin_dir = std::path::PathBuf::from(format!(".bfcode/plugins/{name}"));
+            if plugin_dir.exists() {
+                println!("Plugin directory already exists: {}", plugin_dir.display());
+                return Ok(());
+            }
+            std::fs::create_dir_all(&plugin_dir)?;
+
+            // Create plugin.json
+            let manifest = serde_json::json!({
+                "name": name,
+                "version": "0.1.0",
+                "description": format!("{name} plugin"),
+                "entry": "main.sh",
+                "tools": [
+                    {
+                        "name": "example",
+                        "description": "An example tool",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "input": {"type": "string", "description": "Input text"}
+                            },
+                            "required": ["input"]
+                        }
+                    }
+                ],
+                "hooks": []
+            });
+            std::fs::write(
+                plugin_dir.join("plugin.json"),
+                serde_json::to_string_pretty(&manifest)?,
+            )?;
+
+            // Create main.sh entry point
+            let script = format!(
+                r#"#!/bin/sh
+# {name} plugin entry point
+# Usage: main.sh tool <tool_name> <json_args>
+#        main.sh hook <hook_type>
+
+case "$1" in
+    tool)
+        TOOL_NAME="$2"
+        ARGS="$3"
+        case "$TOOL_NAME" in
+            example)
+                echo "Hello from {name} plugin! Input: $ARGS"
+                ;;
+            *)
+                echo "Unknown tool: $TOOL_NAME" >&2
+                exit 1
+                ;;
+        esac
+        ;;
+    hook)
+        HOOK_TYPE="$2"
+        echo "Hook fired: $HOOK_TYPE"
+        ;;
+    *)
+        echo "Usage: main.sh [tool|hook] ..." >&2
+        exit 1
+        ;;
+esac
+"#
+            );
+            let script_path = plugin_dir.join("main.sh");
+            std::fs::write(&script_path, script)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))?;
+            }
+
+            println!(
+                "{} Plugin '{}' created at {}",
+                "✓".green(),
+                name.cyan(),
+                plugin_dir.display()
+            );
+            println!("  Edit {} to define tools and hooks", "plugin.json".cyan());
+            println!("  Edit {} for implementation", "main.sh".cyan());
         }
     }
     Ok(())
@@ -1253,6 +1433,19 @@ async fn run_interactive(initial_message: Option<String>, oneshot: bool) -> Resu
     };
     let mut tool_defs = tools::get_tool_definitions();
 
+    // Initialize plugins
+    let plugin_mgr = plugin::PluginManager::load();
+    let plugin_tools = plugin_mgr.get_tool_definitions();
+    if !plugin_tools.is_empty() {
+        tool_defs.extend(plugin_tools);
+    }
+    // Merge plugin hooks into hook manager
+    let mut hook_mgr = plugin::HookManager::load();
+    for hook_config in plugin_mgr.get_hook_configs() {
+        hook_mgr.add_hook(hook_config);
+    }
+    plugin::set_plugin_manager(plugin_mgr).await;
+
     // Initialize MCP servers from config
     let full_config = config::load_full_config().unwrap_or_else(|_| config::FullConfig {
         model: config.model.clone(),
@@ -1320,6 +1513,19 @@ async fn run_interactive(initial_message: Option<String>, oneshot: bool) -> Resu
         println!();
     }
 
+    // Fire session_start hook
+    {
+        let ctx = plugin::HookContext {
+            session_id: session.id.clone(),
+            model: Some(config.model.clone()),
+            working_dir: Some(cwd.clone()),
+            ..Default::default()
+        };
+        hook_mgr
+            .run_hooks(plugin::HookType::SessionStart, &ctx)
+            .await;
+    }
+
     // If an initial message was provided, process it first
     if let Some(ref msg) = initial_message {
         if oneshot {
@@ -1336,6 +1542,7 @@ async fn run_interactive(initial_message: Option<String>, oneshot: bool) -> Resu
             client.as_ref(),
             &tool_defs,
             &permissions,
+            &hook_mgr,
         )
         .await?;
         if oneshot {
@@ -1384,6 +1591,7 @@ async fn run_interactive(initial_message: Option<String>, oneshot: bool) -> Resu
                     client.as_ref(),
                     &tool_defs,
                     &permissions,
+                    &hook_mgr,
                 )
                 .await?;
                 continue;
@@ -1408,6 +1616,7 @@ async fn run_interactive(initial_message: Option<String>, oneshot: bool) -> Resu
                     client.as_ref(),
                     &tool_defs,
                     &permissions,
+                    &hook_mgr,
                 )
                 .await?;
                 continue;
@@ -1437,8 +1646,19 @@ async fn run_interactive(initial_message: Option<String>, oneshot: bool) -> Resu
             client.as_ref(),
             &tool_defs,
             &permissions,
+            &hook_mgr,
         )
         .await?;
+    }
+
+    // Fire session_end hook
+    {
+        let ctx = plugin::HookContext {
+            session_id: session.id.clone(),
+            model: Some(config.model.clone()),
+            ..Default::default()
+        };
+        hook_mgr.run_hooks(plugin::HookType::SessionEnd, &ctx).await;
     }
 
     // Shutdown MCP servers
@@ -1591,6 +1811,7 @@ async fn process_user_message(
     client: &dyn api::ChatClient,
     tool_defs: &[types::ToolDefinition],
     permissions: &tools::Permissions,
+    hook_mgr: &plugin::HookManager,
 ) -> Result<()> {
     // Auto-set session title from first user message
     if session.title == "New session" {
@@ -1608,6 +1829,19 @@ async fn process_user_message(
             .push(Message::user_with_images(&clean_input, images));
     } else {
         session.conversation.push(Message::user(input));
+    }
+
+    // Fire message_before hook
+    {
+        let ctx = plugin::HookContext {
+            session_id: session.id.clone(),
+            message: Some(input.to_string()),
+            model: Some(config.model.clone()),
+            ..Default::default()
+        };
+        hook_mgr
+            .run_hooks(plugin::HookType::MessageBefore, &ctx)
+            .await;
     }
 
     // Context Window Guard — pre-flight check before sending to LLM
@@ -1749,6 +1983,29 @@ async fn process_user_message(
                 .push(Message::assistant_tool_calls(tool_calls.clone()));
 
             for tc in tool_calls {
+                // Fire tool_before hook
+                let hook_ctx = plugin::HookContext {
+                    session_id: session.id.clone(),
+                    tool_name: Some(tc.function.name.clone()),
+                    tool_args: Some(tc.function.arguments.clone()),
+                    model: Some(config.model.clone()),
+                    ..Default::default()
+                };
+                let before_results = hook_mgr
+                    .run_hooks(plugin::HookType::ToolBefore, &hook_ctx)
+                    .await;
+
+                // If any hook blocks the tool, skip execution
+                if plugin::HookManager::any_blocked(&before_results) {
+                    let blocked_msg = "Tool blocked by hook.";
+                    tools::print_tool_call(&tc.function.name, &tc.function.arguments);
+                    eprintln!("  {} {}", "⊘".yellow(), blocked_msg);
+                    session
+                        .conversation
+                        .push(Message::tool_result(&tc.id, blocked_msg));
+                    continue;
+                }
+
                 tools::print_tool_call(&tc.function.name, &tc.function.arguments);
                 let result = tools::execute_tool(
                     &tc.function.name,
@@ -1760,6 +2017,20 @@ async fn process_user_message(
                 // Context Window Guard: truncate oversized tool results
                 let result = guard::truncate_tool_result(&result, &config.model);
                 tools::print_tool_result(&result);
+
+                // Fire tool_after hook
+                let after_ctx = plugin::HookContext {
+                    session_id: session.id.clone(),
+                    tool_name: Some(tc.function.name.clone()),
+                    tool_args: Some(tc.function.arguments.clone()),
+                    tool_result: Some(result.clone()),
+                    model: Some(config.model.clone()),
+                    ..Default::default()
+                };
+                hook_mgr
+                    .run_hooks(plugin::HookType::ToolAfter, &after_ctx)
+                    .await;
+
                 session
                     .conversation
                     .push(Message::tool_result(&tc.id, &result));
@@ -1798,7 +2069,35 @@ async fn process_user_message(
             }
         }
 
+        // Fire response_complete and message_after hooks
+        {
+            let response_text = assistant_msg.content.clone().unwrap_or_default();
+            let ctx = plugin::HookContext {
+                session_id: session.id.clone(),
+                message: Some(response_text),
+                model: Some(config.model.clone()),
+                ..Default::default()
+            };
+            hook_mgr
+                .run_hooks(plugin::HookType::ResponseComplete, &ctx)
+                .await;
+            hook_mgr
+                .run_hooks(plugin::HookType::MessageAfter, &ctx)
+                .await;
+        }
+
         break;
+    }
+
+    // Fire error hook if needed
+    if error_occurred {
+        let ctx = plugin::HookContext {
+            session_id: session.id.clone(),
+            error: Some("Agent loop error".to_string()),
+            model: Some(config.model.clone()),
+            ..Default::default()
+        };
+        hook_mgr.run_hooks(plugin::HookType::Error, &ctx).await;
     }
 
     // Remove last user message on error
@@ -2518,6 +2817,7 @@ mod tests {
                 &mock,
                 &tool_defs,
                 &permissions,
+                &plugin::HookManager::with_hooks(vec![]),
             )
             .await
             .unwrap();
@@ -2562,6 +2862,7 @@ mod tests {
                 &mock,
                 &tool_defs,
                 &permissions,
+                &plugin::HookManager::with_hooks(vec![]),
             )
             .await
             .unwrap();
@@ -2610,6 +2911,7 @@ mod tests {
                 &mock,
                 &tool_defs,
                 &permissions,
+                &plugin::HookManager::with_hooks(vec![]),
             )
             .await
             .unwrap();
@@ -2656,6 +2958,7 @@ mod tests {
                 &mock,
                 &tool_defs,
                 &permissions,
+                &plugin::HookManager::with_hooks(vec![]),
             )
             .await;
 
@@ -2687,6 +2990,7 @@ mod tests {
                 &mock,
                 &tool_defs,
                 &permissions,
+                &plugin::HookManager::with_hooks(vec![]),
             )
             .await;
 
@@ -2719,6 +3023,7 @@ mod tests {
                 &mock,
                 &tool_defs,
                 &permissions,
+                &plugin::HookManager::with_hooks(vec![]),
             )
             .await
             .unwrap();
@@ -2754,6 +3059,7 @@ mod tests {
                 &mock,
                 &tool_defs,
                 &permissions,
+                &plugin::HookManager::with_hooks(vec![]),
             )
             .await
             .unwrap();
@@ -2781,6 +3087,7 @@ mod tests {
                 &mock,
                 &tool_defs,
                 &permissions,
+                &plugin::HookManager::with_hooks(vec![]),
             )
             .await
             .unwrap();
@@ -2812,6 +3119,7 @@ mod tests {
                 &mock,
                 &tool_defs,
                 &permissions,
+                &plugin::HookManager::with_hooks(vec![]),
             )
             .await
             .unwrap();
@@ -2824,6 +3132,7 @@ mod tests {
                 &mock,
                 &tool_defs,
                 &permissions,
+                &plugin::HookManager::with_hooks(vec![]),
             )
             .await
             .unwrap();
@@ -2866,6 +3175,7 @@ mod tests {
                 &mock,
                 &tool_defs,
                 &permissions,
+                &plugin::HookManager::with_hooks(vec![]),
             )
             .await
             .unwrap();
@@ -2910,6 +3220,7 @@ mod tests {
                 &mock,
                 &tool_defs,
                 &permissions,
+                &plugin::HookManager::with_hooks(vec![]),
             )
             .await;
 
@@ -3112,6 +3423,7 @@ mod tests {
                 &mock,
                 &tool_defs,
                 &permissions,
+                &plugin::HookManager::with_hooks(vec![]),
             )
             .await
             .unwrap();

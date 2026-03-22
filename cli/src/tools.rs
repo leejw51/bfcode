@@ -38,6 +38,11 @@ pub async fn shutdown_mcp() {
     }
 }
 
+/// Execute a plugin tool via the global plugin manager.
+pub async fn execute_plugin_tool(name: &str, arguments: &str) -> Result<String> {
+    crate::plugin::execute_plugin_tool(name, arguments).await
+}
+
 /// Agent mode — determines which tools are available
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AgentMode {
@@ -774,7 +779,8 @@ async fn execute_tool_inner(
             | "browser_evaluate"
             | "image_generate"
             | "tts"
-    ) || name.starts_with("mcp_");
+    ) || name.starts_with("mcp_")
+        || name.starts_with("plugin_");
     if needs_permission {
         let summary = tool_permission_summary(name, arguments);
         match permissions.ask_permission(name, &summary) {
@@ -826,6 +832,10 @@ async fn execute_tool_inner(
                 Some(manager) => manager.execute_tool(name, arguments).await,
                 None => Err(anyhow::anyhow!("MCP not initialized")),
             }
+        }
+        _ if name.starts_with("plugin_") => {
+            // Dispatch to plugin manager
+            execute_plugin_tool(name, arguments).await
         }
         _ => Err(anyhow::anyhow!("Unknown tool: {name}")),
     };
