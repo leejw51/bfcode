@@ -56,11 +56,38 @@ jobs:
           sudo apt-get install -y gcc-aarch64-linux-gnu
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
 
+      # ── Build ─────────────────────────────────────────────────────────
       - name: Build release
         working-directory: cli
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Package binaries
+      # ── macOS: Sign & Notarize bfcode ─────────────────────────────────
+      - name: Sign & Notarize bfcode
+        if: runner.os == 'macOS'
+        uses: indygreg/apple-code-sign-action@v1
+        with:
+          input_path: cli/target/${{ matrix.target }}/release/bfcode
+          p12_file: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          p12_password: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          notarize: true
+          apple_id: ${{ secrets.APPLE_ID }}
+          apple_password: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          team_id: ${{ secrets.TEAM_ID }}
+
+      - name: Sign & Notarize bfcode-client
+        if: runner.os == 'macOS'
+        uses: indygreg/apple-code-sign-action@v1
+        with:
+          input_path: cli/target/${{ matrix.target }}/release/bfcode-client
+          p12_file: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          p12_password: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          notarize: true
+          apple_id: ${{ secrets.APPLE_ID }}
+          apple_password: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          team_id: ${{ secrets.TEAM_ID }}
+
+      # ── Package: sign first, then zip ─────────────────────────────────
+      - name: Package binaries as zip
         run: |
           mkdir -p dist
           cp cli/target/${{ matrix.target }}/release/bfcode dist/${{ matrix.artifact }}
@@ -68,17 +95,21 @@ jobs:
           cp cli/target/${{ matrix.target }}/release/bfcode-client dist/${{ matrix.client_artifact }}
           chmod +x dist/${{ matrix.client_artifact }}
 
-      - name: Upload artifact
+          cd dist
+          zip "${{ matrix.artifact }}.zip" "${{ matrix.artifact }}"
+          zip "${{ matrix.client_artifact }}.zip" "${{ matrix.client_artifact }}"
+
+      - name: Upload artifact (zip)
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: dist/${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}.zip
 
-      - name: Upload client artifact
+      - name: Upload client artifact (zip)
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.client_artifact }}
-          path: dist/${{ matrix.client_artifact }}
+          path: dist/${{ matrix.client_artifact }}.zip
 
   release:
     name: Create Release
@@ -99,9 +130,7 @@ jobs:
             cp "$dir"* release/
           done
           cd release
-          for f in *; do
-            sha256sum "$f" >> checksums.txt
-          done
+          sha256sum *.zip > checksums.txt
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
