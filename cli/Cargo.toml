@@ -23,6 +23,8 @@ ratatui = "0.29"
 crossterm = "0.28"
 unicode-width = "0.2"
 uuid = { version = "1", features = ["v4"] }
+git2 = "0.20"
+octocrab = "0.44"
 
 [[bin]]
 name = "bfcode"

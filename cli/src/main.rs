@@ -8,6 +8,7 @@ mod daemon;
 mod doctor;
 mod fallback;
 mod gateway;
+mod github;
 mod guard;
 mod lsp;
 mod mcp;
@@ -22,6 +23,7 @@ mod test_utils;
 mod tools;
 mod tui;
 mod types;
+mod worktree;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -151,6 +153,14 @@ enum Commands {
         #[arg(long)]
         tools: Option<usize>,
     },
+
+    /// Manage git worktrees for isolated parallel work
+    #[command(subcommand)]
+    Worktree(WorktreeCommands),
+
+    /// GitHub operations (PRs, issues)
+    #[command(subcommand)]
+    Github(GithubCommands),
 }
 
 #[derive(Subcommand)]
@@ -383,6 +393,108 @@ enum ContextCommands {
     Show,
 }
 
+#[derive(Subcommand)]
+enum WorktreeCommands {
+    /// List all worktrees
+    List,
+    /// Create a new worktree
+    Create {
+        /// Worktree name
+        name: String,
+        /// Path for the worktree directory (default: ../<name>)
+        #[arg(short, long)]
+        path: Option<String>,
+        /// Existing branch to checkout (creates new branch from HEAD if omitted)
+        #[arg(short, long)]
+        branch: Option<String>,
+    },
+    /// Remove a worktree
+    Remove {
+        /// Worktree name
+        name: String,
+        /// Force removal even with uncommitted changes
+        #[arg(short, long)]
+        force: bool,
+    },
+    /// Reset a worktree to match its branch HEAD
+    Reset {
+        /// Worktree name
+        name: String,
+    },
+    /// Lock a worktree to prevent accidental removal
+    Lock {
+        /// Worktree name
+        name: String,
+        /// Reason for locking
+        #[arg(short, long)]
+        reason: Option<String>,
+    },
+    /// Unlock a worktree
+    Unlock {
+        /// Worktree name
+        name: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum GithubCommands {
+    /// List pull requests
+    Pr {
+        /// Filter by state: open, closed, all (default: open)
+        #[arg(short, long)]
+        state: Option<String>,
+        /// Repository (owner/repo). Auto-detected from git remote if omitted
+        #[arg(short, long)]
+        repo: Option<String>,
+    },
+    /// Show details of a specific PR
+    PrShow {
+        /// PR number
+        number: u64,
+        /// Repository (owner/repo)
+        #[arg(short, long)]
+        repo: Option<String>,
+    },
+    /// Create a new pull request
+    PrCreate {
+        /// PR title
+        #[arg(short, long)]
+        title: String,
+        /// Head branch (default: current branch)
+        #[arg(long)]
+        head: Option<String>,
+        /// Base branch (default: main)
+        #[arg(long, default_value = "main")]
+        base: String,
+        /// PR body/description
+        #[arg(short, long)]
+        body: Option<String>,
+        /// Create as draft
+        #[arg(short, long)]
+        draft: bool,
+        /// Repository (owner/repo)
+        #[arg(short, long)]
+        repo: Option<String>,
+    },
+    /// Checkout a PR branch locally
+    PrCheckout {
+        /// PR number
+        number: u64,
+        /// Repository (owner/repo)
+        #[arg(short, long)]
+        repo: Option<String>,
+    },
+    /// List issues
+    Issues {
+        /// Filter by state: open, closed, all (default: open)
+        #[arg(short, long)]
+        state: Option<String>,
+        /// Repository (owner/repo)
+        #[arg(short, long)]
+        repo: Option<String>,
+    },
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -418,6 +530,8 @@ async fn main() -> Result<()> {
         Some(Commands::Cfg(cmd)) => run_cfg_command(cmd),
         Some(Commands::Telegram) => telegram::run_telegram_bot().await,
         Some(Commands::Stats { days, tools }) => run_stats_command(days, tools),
+        Some(Commands::Worktree(cmd)) => run_worktree_command(cmd),
+        Some(Commands::Github(cmd)) => run_github_command(cmd).await,
     }
 }
 
@@ -1292,6 +1406,110 @@ fn run_diagnostics_command() -> Result<()> {
     Ok(())
 }
 
+fn run_worktree_command(cmd: WorktreeCommands) -> Result<()> {
+    let manager = worktree::WorktreeManager::open()?;
+    match cmd {
+        WorktreeCommands::List => {
+            let wts = manager.list()?;
+            print!("{}", worktree::format_worktrees(&wts));
+        }
+        WorktreeCommands::Create { name, path, branch } => {
+            let wt_path = path
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::PathBuf::from("..").join(&name));
+            let wt_path = manager.create(&name, &wt_path, branch.as_deref())?;
+            println!(
+                "{}",
+                format!("Created worktree '{}' at {}", name, wt_path.display()).green()
+            );
+            if branch.is_some() {
+                println!("  Branch: {}", branch.unwrap().cyan());
+            } else {
+                println!("  New branch: {}", name.cyan());
+            }
+        }
+        WorktreeCommands::Remove { name, force } => {
+            manager.remove(&name, force)?;
+            println!("{}", format!("Removed worktree '{}'", name).green());
+        }
+        WorktreeCommands::Reset { name } => {
+            manager.reset(&name)?;
+            println!(
+                "{}",
+                format!("Reset worktree '{}' to branch HEAD", name).green()
+            );
+        }
+        WorktreeCommands::Lock { name, reason } => {
+            manager.lock(&name, reason.as_deref())?;
+            println!("{}", format!("Locked worktree '{}'", name).green());
+        }
+        WorktreeCommands::Unlock { name } => {
+            manager.unlock(&name)?;
+            println!("{}", format!("Unlocked worktree '{}'", name).green());
+        }
+    }
+    Ok(())
+}
+
+async fn run_github_command(cmd: GithubCommands) -> Result<()> {
+    match cmd {
+        GithubCommands::Pr { state, repo } => {
+            let slug = resolve_slug(repo.as_deref())?;
+            let prs = github::list_prs(&slug, state.as_deref()).await?;
+            print!("{}", github::format_prs(&prs));
+        }
+        GithubCommands::PrShow { number, repo } => {
+            let slug = resolve_slug(repo.as_deref())?;
+            let pr = github::get_pr(&slug, number).await?;
+            print!("{}", github::format_prs(&[pr]));
+        }
+        GithubCommands::PrCreate {
+            title,
+            head,
+            base,
+            body,
+            draft,
+            repo,
+        } => {
+            let slug = resolve_slug(repo.as_deref())?;
+            let head_branch = head.unwrap_or_else(|| {
+                git2::Repository::discover(".")
+                    .ok()
+                    .and_then(|r| {
+                        let head = r.head().ok()?;
+                        head.shorthand().map(String::from)
+                    })
+                    .unwrap_or_else(|| "HEAD".to_string())
+            });
+            let pr = github::create_pr(&slug, &title, &head_branch, &base, body.as_deref(), draft)
+                .await?;
+            println!(
+                "{}",
+                format!("Created PR #{}: {}", pr.number, pr.title).green()
+            );
+            println!("  {}", pr.url.cyan());
+        }
+        GithubCommands::PrCheckout { number, repo } => {
+            let slug = resolve_slug(repo.as_deref())?;
+            let msg = github::checkout_pr(&slug, number).await?;
+            println!("{}", msg.green());
+        }
+        GithubCommands::Issues { state, repo } => {
+            let slug = resolve_slug(repo.as_deref())?;
+            let issues = github::list_issues(&slug, state.as_deref()).await?;
+            print!("{}", github::format_issues(&issues));
+        }
+    }
+    Ok(())
+}
+
+fn resolve_slug(repo: Option<&str>) -> Result<github::RepoSlug> {
+    match repo {
+        Some(r) => github::RepoSlug::parse(r),
+        None => github::detect_repo_slug(),
+    }
+}
+
 fn run_stats_command(days: Option<u32>, tool_limit: Option<usize>) -> Result<()> {
     let sessions_dir = std::path::PathBuf::from(".bfcode/sessions");
     if !sessions_dir.exists() {
@@ -1312,8 +1530,7 @@ fn run_stats_command(days: Option<u32>, tool_limit: Option<usize>) -> Result<()>
     let mut total_cost: f64 = 0.0;
     let mut model_usage: std::collections::HashMap<String, (u64, u64, u64, f64)> =
         std::collections::HashMap::new(); // model -> (input, output, messages, cost)
-    let mut tool_usage: std::collections::HashMap<String, u64> =
-        std::collections::HashMap::new();
+    let mut tool_usage: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
     let mut earliest: Option<String> = None;
     let mut latest: Option<String> = None;
 
@@ -1384,7 +1601,10 @@ fn run_stats_command(days: Option<u32>, tool_limit: Option<usize>) -> Result<()>
     }
 
     if total_sessions == 0 {
-        println!("{}", "No sessions found in the specified time range.".dimmed());
+        println!(
+            "{}",
+            "No sessions found in the specified time range.".dimmed()
+        );
         return Ok(());
     }
 
@@ -1400,15 +1620,15 @@ fn run_stats_command(days: Option<u32>, tool_limit: Option<usize>) -> Result<()>
 
     // Overview
     println!("┌{}┐", sep);
-    println!(
-        "│{}│",
-        format!("{:^width$}", "OVERVIEW", width = width - 2)
-    );
+    println!("│{}│", format!("{:^width$}", "OVERVIEW", width = width - 2));
     println!("├{}┤", sep);
     println!("{}", render_row("Sessions", &total_sessions.to_string()));
     println!("{}", render_row("Messages", &total_messages.to_string()));
     if let (Some(e), Some(l)) = (&earliest, &latest) {
-        println!("{}", render_row("Date Range", &format!("{} → {}", &e[..10], &l[..10])));
+        println!(
+            "{}",
+            render_row("Date Range", &format!("{} → {}", &e[..10], &l[..10]))
+        );
     }
     if let Some(d) = days {
         println!("{}", render_row("Period", &format!("last {} days", d)));
@@ -1474,7 +1694,7 @@ fn run_stats_command(days: Option<u32>, tool_limit: Option<usize>) -> Result<()>
     // Model Usage
     if !model_usage.is_empty() {
         let mut models: Vec<_> = model_usage.into_iter().collect();
-        models.sort_by(|a, b| b.1 .2.cmp(&a.1 .2));
+        models.sort_by(|a, b| b.1.2.cmp(&a.1.2));
 
         println!("┌{}┐", sep);
         println!(
@@ -1483,24 +1703,11 @@ fn run_stats_command(days: Option<u32>, tool_limit: Option<usize>) -> Result<()>
         );
         println!("├{}┤", sep);
         for (model, (input, output, sessions, cost)) in &models {
-            println!(
-                "│ {:<width$} │",
-                model,
-                width = width - 4
-            );
+            println!("│ {:<width$} │", model, width = width - 4);
             println!("{}", render_row("  Sessions", &sessions.to_string()));
-            println!(
-                "{}",
-                render_row("  Input Tokens", &format_tokens(*input))
-            );
-            println!(
-                "{}",
-                render_row("  Output Tokens", &format_tokens(*output))
-            );
-            println!(
-                "{}",
-                render_row("  Cost", &types::format_cost(*cost))
-            );
+            println!("{}", render_row("  Input Tokens", &format_tokens(*input)));
+            println!("{}", render_row("  Output Tokens", &format_tokens(*output)));
+            println!("{}", render_row("  Cost", &types::format_cost(*cost)));
             println!("├{}┤", sep);
         }
         // Replace last separator with bottom border
@@ -2998,17 +3205,51 @@ fn handle_command(
             println!("├{}┤", sep);
             println!("{}", render_row("Session", &session.id));
             println!("{}", render_row("Title", &session.title));
-            println!("{}", render_row("Model", &if session.model.is_empty() { config.model.clone() } else { session.model.clone() }));
-            println!("{}", render_row("Messages", &session.conversation.len().to_string()));
+            println!(
+                "{}",
+                render_row(
+                    "Model",
+                    &if session.model.is_empty() {
+                        config.model.clone()
+                    } else {
+                        session.model.clone()
+                    }
+                )
+            );
+            println!(
+                "{}",
+                render_row("Messages", &session.conversation.len().to_string())
+            );
             println!("├{}┤", sep);
-            println!("{}", render_row("Input Tokens", &format_tokens(session.total_input_tokens)));
-            println!("{}", render_row("Output Tokens", &format_tokens(session.total_output_tokens)));
-            println!("{}", render_row("Total Tokens", &format_tokens(session.total_tokens)));
+            println!(
+                "{}",
+                render_row("Input Tokens", &format_tokens(session.total_input_tokens))
+            );
+            println!(
+                "{}",
+                render_row("Output Tokens", &format_tokens(session.total_output_tokens))
+            );
+            println!(
+                "{}",
+                render_row("Total Tokens", &format_tokens(session.total_tokens))
+            );
             println!("├{}┤", sep);
-            println!("{}", render_row("Session Cost", &types::format_cost(session.total_cost)));
+            println!(
+                "{}",
+                render_row("Session Cost", &types::format_cost(session.total_cost))
+            );
             if session.total_input_tokens > 0 {
-                let avg_cost_per_msg = session.total_cost / (session.conversation.iter().filter(|m| m.role == "assistant").count().max(1) as f64);
-                println!("{}", render_row("Avg Cost/Response", &types::format_cost(avg_cost_per_msg)));
+                let avg_cost_per_msg = session.total_cost
+                    / (session
+                        .conversation
+                        .iter()
+                        .filter(|m| m.role == "assistant")
+                        .count()
+                        .max(1) as f64);
+                println!(
+                    "{}",
+                    render_row("Avg Cost/Response", &types::format_cost(avg_cost_per_msg))
+                );
             }
             println!("└{}┘", sep);
         }
@@ -4245,8 +4486,7 @@ mod tests {
             s1.created_at = "2026-03-20 10:00:00".into();
             s1.updated_at = "2026-03-20 11:00:00".into();
             s1.conversation.push(Message::user("hello"));
-            s1.conversation
-                .push(Message::assistant_text("hi there"));
+            s1.conversation.push(Message::assistant_text("hi there"));
 
             let mut s2 = ProjectSession::new();
             s2.id = "stats_test_2".into();

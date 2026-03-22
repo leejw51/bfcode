@@ -1815,9 +1815,7 @@ mod tests {
         session.total_output_tokens = 2000;
         session.total_cost = 0.50;
         session.model = "gpt-4o".into();
-        session
-            .conversation
-            .push(Message::user("hello"));
+        session.conversation.push(Message::user("hello"));
         session
             .conversation
             .push(Message::assistant_text("hi there"));
