@@ -311,6 +311,11 @@ make clean          # cargo clean
 
 Prebuilt binaries are available on the [Releases](../../releases) page for Linux (amd64/arm64) and macOS (amd64/arm64).
 
+## Videos
+
+- [Trailer](https://youtu.be/yeWRjActFkc?si=vOZ18Rs-dkOWj-6q)
+- [Use Case](https://youtu.be/eIjJL0j8YLY?si=Byd0chH1BQ09IFFb)
+
 ## License
 
 MIT
