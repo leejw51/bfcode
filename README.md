@@ -29,7 +29,7 @@ bfcode runs an autonomous agent loop: you describe a task, and it reads files, w
 
 ```bash
 # 1. Set at least one API key
-export ANTHROPIC_API_KEY=your-key   # or GROK_API_KEY or OPENAI_API_KEY
+export GROK_API_KEY=your-key         # or OPENAI_API_KEY or ANTHROPIC_API_KEY
 
 # 2. Build and install
 cd cli
