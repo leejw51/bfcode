@@ -313,8 +313,11 @@ Prebuilt binaries are available on the [Releases](../../releases) page for Linux
 
 ## Videos
 
-- [Trailer](https://youtu.be/yeWRjActFkc?si=vOZ18Rs-dkOWj-6q)
-- [Use Case](https://youtu.be/eIjJL0j8YLY?si=Byd0chH1BQ09IFFb)
+[![Trailer](https://img.youtube.com/vi/yeWRjActFkc/hqdefault.jpg)](https://youtu.be/yeWRjActFkc?si=vOZ18Rs-dkOWj-6q)
+
+[![Use Case](https://img.youtube.com/vi/eIjJL0j8YLY/hqdefault.jpg)](https://youtu.be/eIjJL0j8YLY?si=Byd0chH1BQ09IFFb)
+
+[![Logo](https://img.youtube.com/vi/GNczLi9D3YM/hqdefault.jpg)](https://youtu.be/GNczLi9D3YM?si=Mr9MZ_EiJicTcOee)
 
 ## License
 
