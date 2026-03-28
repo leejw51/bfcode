@@ -25,11 +25,11 @@ release:
 
 install: release
 	mkdir -p ~/.local/bin
-	cp target/release/bfcode ~/.local/bin/
-	cp target/release/bfcode-client ~/.local/bin/bfcode_client
+	cp target/release/bfcode ~/.local/bin/bfcode
+	cp target/release/bfcode-client ~/.local/bin/bfcode-client
 	@if [ "$$(uname)" = "Darwin" ]; then codesign --force --sign - ~/.local/bin/bfcode; fi
-	@if [ "$$(uname)" = "Darwin" ]; then codesign --force --sign - ~/.local/bin/bfcode_client; fi
-	@echo "Installed bfcode and bfcode_client to ~/.local/bin/"
+	@if [ "$$(uname)" = "Darwin" ]; then codesign --force --sign - ~/.local/bin/bfcode-client; fi
+	@echo "Installed bfcode and bfcode-client to ~/.local/bin/"
 
 gateway: build
 	cargo run --bin bfcode -- gateway start

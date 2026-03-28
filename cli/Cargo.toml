@@ -23,6 +23,16 @@ ratatui = "0.29"
 crossterm = "0.28"
 unicode-width = "0.2"
 uuid = { version = "1", features = ["v4"] }
+tokio-tungstenite = "0.24"
+sha1 = "0.10"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+axum = { version = "0.8", features = ["ws"] }
+tower-http = { version = "0.6", features = ["cors"] }
+
+[lib]
+name = "bfcode"
+path = "src/lib.rs"
 
 [[bin]]
 name = "bfcode"

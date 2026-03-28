@@ -312,6 +312,9 @@ enum GatewayCommands {
         /// Enable Tailscale integration
         #[arg(long)]
         tailscale: bool,
+        /// Enable verbose logging (sessions, connections, requests)
+        #[arg(short, long)]
+        verbose: bool,
     },
     /// Show gateway status
     Status {
@@ -1169,7 +1172,7 @@ fn run_cron_command(cmd: CronCommands) -> Result<()> {
 
 async fn run_gateway_command(cmd: GatewayCommands) -> Result<()> {
     match cmd {
-        GatewayCommands::Start { listen, tailscale } => {
+        GatewayCommands::Start { listen, tailscale, verbose } => {
             let mut config = gateway::load_gateway_config();
             if let Some(addr) = listen {
                 config.listen = addr;
@@ -1177,7 +1180,7 @@ async fn run_gateway_command(cmd: GatewayCommands) -> Result<()> {
             if tailscale {
                 config.tailscale = true;
             }
-            gateway::start_server(&config).await
+            gateway::start_server(&config, verbose).await
         }
         GatewayCommands::Status { url } => {
             if let Some(url) = url {

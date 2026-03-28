@@ -372,32 +372,74 @@ function login.doConnect(state)
         headers["Authorization"] = "Bearer " .. state.api_key
     end
 
+    -- Step 1: Health check
     http.get(url .. "/v1/health", headers, function(resp)
-        connecting = false
         if not resp.success then
+            connecting = false
             state.error_msg = "Connection failed: " .. (resp.error or "unknown error")
             return
         end
 
         local statusCode = tonumber(resp.data.status) or 0
         if statusCode == 401 then
+            connecting = false
             state.error_msg = "Invalid API key"
             return
         end
 
         if statusCode ~= 200 then
+            connecting = false
             state.error_msg = "Server error (HTTP " .. tostring(resp.data.status) .. ")"
             return
         end
 
         local ok, data = pcall(json.decode, resp.data.body)
-        if ok and data and data.status == "ok" then
-            state.connected = true
-            state.session_id = nil
-            state.screen = "chat"
-        else
+        if not ok or not data or data.status ~= "ok" then
+            connecting = false
             state.error_msg = "Unexpected server response"
+            return
         end
+
+        -- Step 2: Fetch gateway status for display info
+        http.get(url .. "/v1/status", headers, function(statusResp)
+            if statusResp.success then
+                local ok2, statusData = pcall(json.decode, statusResp.data.body)
+                if ok2 and type(statusData) == "table" then
+                    state.gateway_mode = statusData.mode
+                    state.gateway_version = statusData.version
+                    state.gateway_sessions = statusData.active_sessions
+                end
+            end
+
+            -- Step 3: Create a session via REST API
+            local sessionHeaders = {["Content-Type"] = "application/json"}
+            if state.api_key and #state.api_key > 0 then
+                sessionHeaders["Authorization"] = "Bearer " .. state.api_key
+            end
+            local username = love.system.getOS() .. "-user"
+            local sessionBody = json.encode({ user = username })
+
+            http.post(url .. "/v1/sessions", sessionBody, sessionHeaders, function(sessResp)
+                connecting = false
+
+                if sessResp.success then
+                    local rawBody = sessResp.data.body or ""
+                    local ok3, sessData = pcall(json.decode, rawBody)
+                    if ok3 and type(sessData) == "table" and sessData.id then
+                        state.session_id = sessData.id
+                        state.session_user = sessData.user
+                        print("[LOGIN] Session created: " .. state.session_id)
+                    else
+                        print("[LOGIN] Failed to parse session response: " .. rawBody:sub(1, 200))
+                    end
+                else
+                    print("[LOGIN] Session creation failed, continuing without session")
+                end
+
+                state.connected = true
+                state.screen = "chat"
+            end)
+        end)
     end)
 end
 

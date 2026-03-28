@@ -9,8 +9,15 @@ local state = {
     gateway_url = "http://127.0.0.1:8642",
     api_key = "",
     session_id = nil,
+    session_user = nil,
     connected = false,
     error_msg = nil,
+    -- Gateway info (fetched on connect)
+    gateway_mode = nil,
+    gateway_version = nil,
+    gateway_sessions = nil,
+    -- Connection mode
+    ws_connected = false,
 }
 
 function love.load()

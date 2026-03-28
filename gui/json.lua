@@ -171,8 +171,15 @@ local function decode_string(str, i)
     decode_error(str, i, "expected closing quote")
 end
 
+local function find_delim(str, idx, set)
+    for i = idx, #str do
+        if set[str:sub(i, i)] then return i end
+    end
+    return #str + 1
+end
+
 local function decode_number(str, i)
-    local x = next_char(str, i, delim_chars)
+    local x = find_delim(str, i, delim_chars)
     local s = str:sub(i, x - 1)
     local n = tonumber(s)
     if not n then decode_error(str, i, "invalid number '" .. s .. "'") end
@@ -180,7 +187,7 @@ local function decode_number(str, i)
 end
 
 local function decode_literal(str, i)
-    local x = next_char(str, i, delim_chars)
+    local x = find_delim(str, i, delim_chars)
     local word = str:sub(i, x - 1)
     if not (word == "true" or word == "false" or word == "null") then
         decode_error(str, i, "invalid literal '" .. word .. "'")

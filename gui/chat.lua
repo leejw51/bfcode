@@ -2,8 +2,10 @@
 local ui = require("ui")
 local http = require("http")
 local json = require("json")
+local ws = require("ws")
 
 local chat = {}
+local useWebSocket = false  -- set true once WS connects
 
 -- Assets
 local bgImage = nil
@@ -92,15 +94,93 @@ function chat.load(state)
     activeBubble = nil
     bubbleQueue = {}
     initialized = false
+    useWebSocket = false
 
+    -- Try to establish WebSocket connection
+    ws.connect(state.gateway_url, {
+        onConnect = function()
+            useWebSocket = true
+            state.ws_connected = true
+            local sessionInfo = ""
+            if state.session_id then
+                sessionInfo = " (session: " .. state.session_id:sub(1, 16) .. "...)"
+            end
+            table.insert(messageLog, {
+                role = "system",
+                text = "WebSocket connected!" .. sessionInfo .. " Type a message to start coding.",
+            })
+            autoScrollPending = true
+        end,
+        onDisconnect = function()
+            useWebSocket = false
+            state.ws_connected = false
+            table.insert(messageLog, {
+                role = "system",
+                text = "WebSocket disconnected. Falling back to HTTP REST API.",
+            })
+            autoScrollPending = true
+        end,
+        onError = function(err)
+            -- Fall back to HTTP REST API
+            useWebSocket = false
+            state.ws_connected = false
+            table.insert(messageLog, {
+                role = "system",
+                text = "WebSocket unavailable, using HTTP REST API.",
+            })
+            autoScrollPending = true
+            print("WebSocket error: " .. tostring(err))
+        end,
+        onMessage = function(data)
+            local ok2, msg = pcall(json.decode, data)
+            if ok2 and type(msg) == "table" then
+                if msg.type == "thinking" then
+                    -- Server acknowledged, chat is processing
+                    print("[WS] Server is thinking...")
+                elseif msg.type == "response" then
+                    sending = false
+                    local W = love.graphics.getWidth()
+
+                    bot.speaking = true
+                    bot.speakTimer = 0
+
+                    local tokenInfo = nil
+                    if msg.total_tokens then
+                        tokenInfo = tostring(msg.total_tokens) .. " tokens"
+                        if msg.cost then
+                            tokenInfo = tokenInfo .. string.format(" ($%.4f)", msg.cost)
+                        end
+                    end
+                    if msg.session_id and not state.session_id then
+                        state.session_id = msg.session_id
+                    end
+                    addBotMsg(msg.response or "", msg.model, tokenInfo, state)
+                    returnToIdle(W)
+                elseif msg.type == "error" then
+                    sending = false
+                    local W = love.graphics.getWidth()
+                    addBotMsg("Error: " .. (msg.error or "Unknown error"), nil, nil, state)
+                    returnToIdle(W)
+                end
+            end
+        end,
+    })
+
+    local connectMsg = "Connecting..."
+    if state.gateway_version then
+        connectMsg = connectMsg .. " (gateway v" .. state.gateway_version .. ", " .. (state.gateway_mode or "local") .. " mode)"
+    end
     table.insert(messageLog, {
         role = "system",
-        text = "Connected! Type a message to start coding.",
+        text = connectMsg,
     })
 end
 
 function chat.update(dt, state)
     local W, H = love.graphics.getWidth(), love.graphics.getHeight()
+
+    -- Poll WebSocket messages
+    ws.update()
 
     -- Layout: top 55% = game world, bottom 45% = log + input
     gameAreaH = math.floor(H * 0.55)
@@ -250,6 +330,13 @@ function chat.draw(state)
     love.graphics.setFont(ui.fonts.normal)
     love.graphics.setColor(1, 1, 1, 0.95)
     love.graphics.print("BFCode Agent", 10, 8)
+
+    -- Connection mode indicator
+    local modeLabel = useWebSocket and "WS" or "HTTP"
+    local modeColor = useWebSocket and {0.3, 1.0, 0.5, 0.8} or {1.0, 0.8, 0.3, 0.8}
+    love.graphics.setFont(ui.fonts.small)
+    love.graphics.setColor(modeColor)
+    love.graphics.print(modeLabel, 130, 10)
 
     -- EXIT button
     local dcW, dcH = 60, 22
@@ -543,10 +630,17 @@ function chat.mousepressed(x, y, button, state)
 
     local d = chat._dcBtn
     if d and x >= d.x and x <= d.x + d.w and y >= d.y and y <= d.y + d.h then
+        ws.disconnect()
+        useWebSocket = false
         state.screen = "login"
         state.connected = false
+        state.ws_connected = false
         state.session_id = nil
+        state.session_user = nil
         state.error_msg = nil
+        state.gateway_mode = nil
+        state.gateway_version = nil
+        state.gateway_sessions = nil
         messageLog = {}
         initialized = false
         return
@@ -599,69 +693,83 @@ function chat.sendMessage(state)
     bot.targetX = W * 0.25
     bot.facing = 1
 
-    local url = state.gateway_url
-    local headers = {["Content-Type"] = "application/json"}
-    if state.api_key and #state.api_key > 0 then
-        headers["Authorization"] = "Bearer " .. state.api_key
-    end
-
-    local body = json.encode({
-        message = msgText,
-        session_id = state.session_id,
-    })
-
-    http.post(url .. "/v1/chat", body, headers, function(resp)
-        sending = false
-        bot.speaking = true
-        bot.speakTimer = 0
-
-        if not resp.success then
-            addBotMsg("Error: " .. (resp.error or "Connection failed"), nil, nil, state)
-            returnToIdle(W)
-            return
+    if useWebSocket and ws.isConnected() then
+        -- Send via WebSocket (persistent connection, single session)
+        local wsMsg = {
+            type = "chat",
+            message = msgText,
+        }
+        if state.session_id then
+            wsMsg.session_id = state.session_id
+        end
+        print("[WS] Sending chat, session_id=" .. tostring(state.session_id))
+        ws.sendJson(wsMsg)
+    else
+        -- Fallback to HTTP
+        local url = state.gateway_url
+        local headers = {["Content-Type"] = "application/json"}
+        if state.api_key and #state.api_key > 0 then
+            headers["Authorization"] = "Bearer " .. state.api_key
         end
 
-        local statusCode = tonumber(resp.data.status) or 0
-        if statusCode ~= 200 then
-            local errMsg = "Error (HTTP " .. tostring(statusCode) .. ")"
-            local rawBody = (resp.data.body or ""):gsub("^%s+", ""):gsub("%s+$", "")
-            local ok2, errData = pcall(json.decode, rawBody)
-            if ok2 and type(errData) == "table" and errData.error then
-                errMsg = errData.error
+        local body = json.encode({
+            message = msgText,
+            session_id = state.session_id,
+        })
+
+        http.post(url .. "/v1/chat", body, headers, function(resp)
+            sending = false
+            bot.speaking = true
+            bot.speakTimer = 0
+
+            if not resp.success then
+                addBotMsg("Error: " .. (resp.error or "Connection failed"), nil, nil, state)
+                returnToIdle(W)
+                return
             end
-            addBotMsg(errMsg, nil, nil, state)
-            returnToIdle(W)
-            return
-        end
 
-        local rawBody = (resp.data.body or ""):gsub("^%s+", ""):gsub("%s+$", "")
-        if rawBody:sub(1, 3) == "\xEF\xBB\xBF" then rawBody = rawBody:sub(4) end
+            local statusCode = tonumber(resp.data.status) or 0
+            if statusCode ~= 200 then
+                local errMsg = "Error (HTTP " .. tostring(statusCode) .. ")"
+                local rawBody = (resp.data.body or ""):gsub("^%s+", ""):gsub("%s+$", "")
+                local ok2, errData = pcall(json.decode, rawBody)
+                if ok2 and type(errData) == "table" and errData.error then
+                    errMsg = errData.error
+                end
+                addBotMsg(errMsg, nil, nil, state)
+                returnToIdle(W)
+                return
+            end
 
-        local ok2, data = pcall(json.decode, rawBody)
-        if ok2 and type(data) == "table" and data.response then
-            local tokenInfo = nil
-            if data.total_tokens then
-                tokenInfo = tostring(data.total_tokens) .. " tokens"
-                if data.cost then
-                    tokenInfo = tokenInfo .. string.format(" ($%.4f)", data.cost)
+            local rawBody = (resp.data.body or ""):gsub("^%s+", ""):gsub("%s+$", "")
+            if rawBody:sub(1, 3) == "\xEF\xBB\xBF" then rawBody = rawBody:sub(4) end
+
+            local ok2, data = pcall(json.decode, rawBody)
+            if ok2 and type(data) == "table" and data.response then
+                local tokenInfo = nil
+                if data.total_tokens then
+                    tokenInfo = tostring(data.total_tokens) .. " tokens"
+                    if data.cost then
+                        tokenInfo = tokenInfo .. string.format(" ($%.4f)", data.cost)
+                    end
+                end
+                if data.session_id and not state.session_id then
+                    state.session_id = data.session_id
+                end
+                addBotMsg(data.response, data.model, tokenInfo, state)
+            else
+                local extracted = rawBody:match('"response"%s*:%s*"(.-)"')
+                if extracted then
+                    extracted = extracted:gsub('\\"', '"'):gsub('\\n', '\n'):gsub('\\\\', '\\')
+                    addBotMsg(extracted, nil, nil, state)
+                else
+                    addBotMsg(rawBody, nil, nil, state)
                 end
             end
-            if data.session_id and not state.session_id then
-                state.session_id = data.session_id
-            end
-            addBotMsg(data.response, data.model, tokenInfo, state)
-        else
-            local extracted = rawBody:match('"response"%s*:%s*"(.-)"')
-            if extracted then
-                extracted = extracted:gsub('\\"', '"'):gsub('\\n', '\n'):gsub('\\\\', '\\')
-                addBotMsg(extracted, nil, nil, state)
-            else
-                addBotMsg(rawBody, nil, nil, state)
-            end
-        end
 
-        returnToIdle(W)
-    end)
+            returnToIdle(W)
+        end)
+    end
 end
 
 function returnToIdle(W)

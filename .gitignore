@@ -6,3 +6,4 @@ cli/.bfcode/.gitignore
 .claude/settings.local.json
 cli/.bfcode/
 
+gui/generated_images/
