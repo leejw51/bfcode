@@ -163,6 +163,7 @@ async fn connect_ws(ws_url: &str, api_key: Option<&str>) -> Result<(WsSink, WsSt
 
 /// Send a JSON message over WebSocket and wait for the response.
 /// Skips intermediate status messages like "thinking".
+/// Responds to server Ping frames to keep the heartbeat alive.
 async fn ws_send_recv(
     sink: &mut WsSink,
     stream: &mut WsStream,
@@ -187,7 +188,12 @@ async fn ws_send_recv(
                     }
                     return Ok(json);
                 }
-                Ok(WsMessage::Ping(_)) => continue,
+                Ok(WsMessage::Ping(data)) => {
+                    // Respond to server heartbeat pings
+                    sink.send(WsMessage::Pong(data)).await.context("Failed to send pong")?;
+                    continue;
+                }
+                Ok(WsMessage::Pong(_)) => continue,
                 Ok(WsMessage::Close(_)) => bail!("Server closed connection"),
                 Err(e) => bail!("WebSocket error: {e}"),
                 _ => continue,
@@ -281,18 +287,59 @@ async fn main() -> Result<()> {
     );
     println!();
 
-    let stdin = io::stdin();
+    // Use a channel to read stdin lines without blocking the async runtime,
+    // so we can respond to server heartbeat pings while waiting for user input.
+    let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    std::thread::spawn(move || {
+        let stdin = io::stdin();
+        loop {
+            let mut line = String::new();
+            match stdin.read_line(&mut line) {
+                Ok(0) | Err(_) => {
+                    let _ = stdin_tx.send(String::new()); // EOF sentinel
+                    break;
+                }
+                Ok(_) => {
+                    let _ = stdin_tx.send(line);
+                }
+            }
+        }
+    });
+
     loop {
         print!("{} ", ">".cyan().bold());
         io::stdout().flush()?;
 
-        let mut input = String::new();
-        if stdin.read_line(&mut input)? == 0 {
-            println!("\nGoodbye!");
-            break;
-        }
+        // Wait for stdin while responding to server heartbeat pings
+        let raw_input = loop {
+            tokio::select! {
+                line = stdin_rx.recv() => {
+                    match line {
+                        Some(l) if l.is_empty() => {
+                            println!("\nGoodbye!");
+                            let _ = sink.send(WsMessage::Close(None)).await;
+                            return Ok(());
+                        }
+                        Some(l) => break l,
+                        None => {
+                            println!("\nGoodbye!");
+                            let _ = sink.send(WsMessage::Close(None)).await;
+                            return Ok(());
+                        }
+                    }
+                }
+                msg = stream.next() => {
+                    if let Some(Ok(WsMessage::Ping(data))) = msg {
+                        let _ = sink.send(WsMessage::Pong(data)).await;
+                    } else if let Some(Ok(WsMessage::Close(_))) | None = msg {
+                        eprintln!("\n{} server closed connection", "bfcode-cli".cyan().bold());
+                        return Ok(());
+                    }
+                }
+            }
+        };
 
-        let input = input.trim();
+        let input = raw_input.trim();
         if input.is_empty() {
             continue;
         }
@@ -303,11 +350,23 @@ async fn main() -> Result<()> {
             loop {
                 print!("{} ", "..".dimmed());
                 io::stdout().flush()?;
-                let mut line = String::new();
-                if stdin.read_line(&mut line)? == 0 {
-                    break;
-                }
-                let line = line.trim_end_matches('\n').trim_end_matches('\r');
+                // In multiline mode, read lines directly (brief enough that missing pings is OK)
+                let raw_line = loop {
+                    tokio::select! {
+                        line = stdin_rx.recv() => {
+                            match line {
+                                Some(l) => break l,
+                                None => break String::new(),
+                            }
+                        }
+                        msg = stream.next() => {
+                            if let Some(Ok(WsMessage::Ping(data))) = msg {
+                                let _ = sink.send(WsMessage::Pong(data)).await;
+                            }
+                        }
+                    }
+                };
+                let line = raw_line.trim_end_matches('\n').trim_end_matches('\r');
                 if line.is_empty() {
                     break;
                 }

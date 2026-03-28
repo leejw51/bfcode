@@ -34,6 +34,20 @@ pub struct GatewayConfig {
     /// Max concurrent sessions
     #[serde(default = "default_max_sessions")]
     pub max_sessions: usize,
+    /// WebSocket heartbeat ping interval in seconds (default 30)
+    #[serde(default = "default_heartbeat_interval")]
+    pub heartbeat_interval_secs: u64,
+    /// WebSocket heartbeat timeout in seconds (default 60)
+    #[serde(default = "default_heartbeat_timeout")]
+    pub heartbeat_timeout_secs: u64,
+}
+
+fn default_heartbeat_interval() -> u64 {
+    30
+}
+
+fn default_heartbeat_timeout() -> u64 {
+    60
 }
 
 fn default_listen() -> String {
@@ -69,6 +83,8 @@ impl Default for GatewayConfig {
             api_keys: vec![],
             tailscale: false,
             max_sessions: default_max_sessions(),
+            heartbeat_interval_secs: default_heartbeat_interval(),
+            heartbeat_timeout_secs: default_heartbeat_timeout(),
         }
     }
 }
@@ -537,13 +553,48 @@ async fn handle_websocket(socket: WebSocket, state: AppState) {
         "bfcode".cyan().bold(),
     );
 
+    // Read heartbeat config from state
+    let (heartbeat_interval_dur, heartbeat_timeout_dur) = {
+        let st = state.lock().await;
+        (
+            std::time::Duration::from_secs(st.config.heartbeat_interval_secs),
+            std::time::Duration::from_secs(st.config.heartbeat_timeout_secs),
+        )
+    };
+
     let (mut ws_tx, mut ws_rx) = socket.split();
 
     // Channel for async chat responses to be sent back on the WS
     let (reply_tx, mut reply_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
+    // Track last pong received (initialized to now so the first heartbeat check passes)
+    let last_pong = Arc::new(Mutex::new(Instant::now()));
+    let mut heartbeat_interval = tokio::time::interval(heartbeat_interval_dur);
+    // Skip the first immediate tick
+    heartbeat_interval.tick().await;
+
     loop {
         tokio::select! {
+            // Periodic heartbeat ping
+            _ = heartbeat_interval.tick() => {
+                // Check if last pong is within timeout
+                let elapsed = last_pong.lock().await.elapsed();
+                if elapsed > heartbeat_timeout_dur {
+                    warn!("WebSocket heartbeat timeout ({:.0}s without pong), closing session", elapsed.as_secs_f64());
+                    eprintln!(
+                        "{} WebSocket heartbeat timeout — closing session",
+                        "bfcode".cyan().bold(),
+                    );
+                    let _ = ws_tx.send(AxumWsMessage::Close(None)).await;
+                    break;
+                }
+                // Send ping
+                if ws_tx.send(AxumWsMessage::Ping(vec![].into())).await.is_err() {
+                    warn!("Failed to send heartbeat ping, closing session");
+                    break;
+                }
+                debug!("Heartbeat ping sent");
+            }
             // Incoming WS messages from client
             msg = ws_rx.next() => {
                 let msg = match msg {
@@ -567,6 +618,10 @@ async fn handle_websocket(socket: WebSocket, state: AppState) {
                         if ws_tx.send(AxumWsMessage::Pong(data)).await.is_err() {
                             break;
                         }
+                    }
+                    AxumWsMessage::Pong(_) => {
+                        debug!("Heartbeat pong received");
+                        *last_pong.lock().await = Instant::now();
                     }
                     AxumWsMessage::Close(_) => break,
                     _ => {}
@@ -1060,6 +1115,8 @@ mod tests {
             api_keys: vec!["secret1".into(), "secret2".into()],
             tailscale: true,
             max_sessions: 50,
+            heartbeat_interval_secs: 15,
+            heartbeat_timeout_secs: 45,
         };
         assert_eq!(cfg.listen, "0.0.0.0:3000");
         assert!(matches!(cfg.mode, GatewayMode::Remote));

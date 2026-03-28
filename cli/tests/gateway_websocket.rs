@@ -12,15 +12,22 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 /// Start the gateway server on a random available port and return the address.
 async fn start_test_server() -> std::net::SocketAddr {
+    start_test_server_with_config(bfcode::gateway::GatewayConfig {
+        max_sessions: 10,
+        ..Default::default()
+    })
+    .await
+}
+
+/// Start the gateway server with custom config on a random port.
+async fn start_test_server_with_config(
+    mut config: bfcode::gateway::GatewayConfig,
+) -> std::net::SocketAddr {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     drop(listener); // free the port for the gateway
 
-    let config = bfcode::gateway::GatewayConfig {
-        listen: addr.to_string(),
-        max_sessions: 10,
-        ..Default::default()
-    };
+    config.listen = addr.to_string();
 
     tokio::spawn(async move {
         bfcode::gateway::start_server(&config, false).await.unwrap();
@@ -379,4 +386,169 @@ async fn test_http_unknown_endpoint_returns_404() {
         .unwrap();
 
     assert_eq!(resp.status(), 404);
+}
+
+// ============================================================
+// Heartbeat tests
+// ============================================================
+
+/// Helper: start a server with fast heartbeat (1s interval, 2s timeout).
+async fn start_fast_heartbeat_server() -> std::net::SocketAddr {
+    start_test_server_with_config(bfcode::gateway::GatewayConfig {
+        max_sessions: 10,
+        heartbeat_interval_secs: 1,
+        heartbeat_timeout_secs: 2,
+        ..Default::default()
+    })
+    .await
+}
+
+/// Server sends Ping frames; client that responds with Pong stays connected.
+#[tokio::test]
+async fn test_heartbeat_ping_received() {
+    let addr = start_fast_heartbeat_server().await;
+    let (mut tx, mut rx) = ws_connect(addr).await;
+
+    // Wait for a server Ping (should arrive within ~1s)
+    let msg = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            if let Some(Ok(msg)) = rx.next().await {
+                if matches!(msg, WsMessage::Ping(_)) {
+                    return msg;
+                }
+            }
+        }
+    })
+    .await
+    .expect("Should receive a Ping from server within 3s");
+
+    assert!(matches!(msg, WsMessage::Ping(_)));
+
+    // Respond with Pong to keep alive
+    if let WsMessage::Ping(data) = msg {
+        tx.send(WsMessage::Pong(data)).await.unwrap();
+    }
+
+    // Verify connection is still alive by sending a message
+    let resp = send_recv(&mut tx, &mut rx, serde_json::json!({"type": "ping"})).await;
+    assert_eq!(resp["type"], "pong");
+}
+
+/// Client responds to Pong — connection stays alive across multiple heartbeats.
+#[tokio::test]
+async fn test_heartbeat_keeps_connection_alive() {
+    let addr = start_fast_heartbeat_server().await;
+    let (mut tx, mut rx) = ws_connect(addr).await;
+
+    // Respond to pings for ~3 heartbeat cycles
+    let survived = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let mut pong_count = 0u32;
+        loop {
+            match rx.next().await {
+                Some(Ok(WsMessage::Ping(data))) => {
+                    tx.send(WsMessage::Pong(data)).await.unwrap();
+                    pong_count += 1;
+                    if pong_count >= 3 {
+                        return pong_count;
+                    }
+                }
+                Some(Ok(WsMessage::Close(_))) | None => {
+                    panic!("Connection closed after {} pongs", pong_count);
+                }
+                _ => continue,
+            }
+        }
+    })
+    .await
+    .expect("Should survive 3 heartbeat cycles");
+
+    assert!(survived >= 3);
+
+    // Connection should still work
+    let resp = send_recv(&mut tx, &mut rx, serde_json::json!({"type": "health"})).await;
+    assert_eq!(resp["type"], "health");
+}
+
+/// Client ignores Pings (no Pong) — server closes connection after timeout.
+///
+/// Note: tokio-tungstenite auto-responds to protocol-level Ping frames,
+/// so we test this by connecting via raw WebSocket handshake and reading
+/// frames without sending Pong back.
+#[tokio::test]
+async fn test_heartbeat_timeout_closes_connection() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let addr = start_fast_heartbeat_server().await;
+
+    // Connect via raw TCP and perform WebSocket handshake manually
+    let mut tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+
+    let handshake = format!(
+        "GET /v1/ws HTTP/1.1\r\n\
+         Host: {}\r\n\
+         Upgrade: websocket\r\n\
+         Connection: Upgrade\r\n\
+         Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+         Sec-WebSocket-Version: 13\r\n\
+         \r\n",
+        addr
+    );
+    tcp.write_all(handshake.as_bytes()).await.unwrap();
+
+    // Read handshake response (just consume it)
+    let mut buf = vec![0u8; 4096];
+    let n = tcp.read(&mut buf).await.unwrap();
+    let response = String::from_utf8_lossy(&buf[..n]);
+    assert!(response.contains("101"), "Expected 101 Switching Protocols, got: {}", response);
+
+    // Now just wait — do NOT send any Pong frames.
+    // The server should close the connection after the heartbeat timeout (~2s).
+    let closed = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let mut frame_buf = vec![0u8; 1024];
+            match tcp.read(&mut frame_buf).await {
+                Ok(0) => return true,  // Connection closed
+                Err(_) => return true, // Connection error = closed
+                Ok(n) => {
+                    // Check if we got a Close frame (opcode 0x08)
+                    if n >= 2 && (frame_buf[0] & 0x0F) == 0x08 {
+                        return true;
+                    }
+                    // Otherwise keep reading (might be Ping frames we ignore)
+                    continue;
+                }
+            }
+        }
+    })
+    .await
+    .expect("Server should close connection within 10s due to heartbeat timeout");
+
+    assert!(closed, "Server should have closed the connection due to heartbeat timeout");
+}
+
+/// WebSocket Ping frame (protocol-level) gets a Pong response.
+#[tokio::test]
+async fn test_ws_protocol_ping_pong() {
+    let addr = start_test_server().await;
+    let (mut tx, mut rx) = ws_connect(addr).await;
+
+    // Send a protocol-level Ping
+    tx.send(WsMessage::Ping(b"hello".to_vec().into()))
+        .await
+        .unwrap();
+
+    // Should get a Pong back with the same payload
+    let resp = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            if let Some(Ok(msg)) = rx.next().await {
+                if let WsMessage::Pong(data) = msg {
+                    return data;
+                }
+            }
+        }
+    })
+    .await
+    .expect("Should receive Pong within 3s");
+
+    assert_eq!(&resp[..], b"hello");
 }
