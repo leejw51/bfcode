@@ -8,6 +8,9 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 use colored::Colorize;
 use futures_util::{SinkExt, StreamExt};
+use rustyline::config::Configurer;
+use rustyline::history::DefaultHistory;
+use rustyline::{DefaultEditor, Editor};
 use std::io::{self, Write};
 use std::time::Duration;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -41,6 +44,15 @@ fn whoami() -> String {
     std::env::var("USER")
         .or_else(|_| std::env::var("USERNAME"))
         .unwrap_or_else(|_| "anonymous".into())
+}
+
+/// Return the path used for persistent command history (client).
+fn client_history_file_path() -> std::path::PathBuf {
+    let dir = dirs::data_dir()
+        .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from(".")))
+        .join("bfcode");
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join("client_history.txt")
 }
 
 /// Convert an HTTP base URL to a WebSocket URL for /v1/ws
@@ -287,42 +299,53 @@ async fn main() -> Result<()> {
     );
     println!();
 
-    // Use a channel to read stdin lines without blocking the async runtime,
-    // so we can respond to server heartbeat pings while waiting for user input.
-    let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    // Use rustyline in a blocking thread for input with history support,
+    // while responding to server heartbeat pings on the async side.
+    let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::unbounded_channel::<Option<String>>();
     std::thread::spawn(move || {
-        let stdin = io::stdin();
+        let hist_path = client_history_file_path();
+        let mut rl = match DefaultEditor::new() {
+            Ok(mut e) => {
+                let _ = e.set_max_history_size(1000);
+                if hist_path.exists() {
+                    let _ = e.load_history(&hist_path);
+                }
+                e
+            }
+            Err(_) => return,
+        };
+        let prompt = format!("{} ", ">".cyan().bold());
         loop {
-            let mut line = String::new();
-            match stdin.read_line(&mut line) {
-                Ok(0) | Err(_) => {
-                    let _ = stdin_tx.send(String::new()); // EOF sentinel
+            match rl.readline(&prompt) {
+                Ok(line) => {
+                    let trimmed = line.trim().to_string();
+                    if !trimmed.is_empty() {
+                        let _ = rl.add_history_entry(&trimmed);
+                        let _ = rl.save_history(&hist_path);
+                    }
+                    let _ = stdin_tx.send(Some(line));
+                }
+                Err(rustyline::error::ReadlineError::Interrupted | rustyline::error::ReadlineError::Eof) => {
+                    let _ = stdin_tx.send(None); // EOF sentinel
                     break;
                 }
-                Ok(_) => {
-                    let _ = stdin_tx.send(line);
+                Err(_) => {
+                    let _ = stdin_tx.send(None);
+                    break;
                 }
             }
         }
     });
 
     loop {
-        print!("{} ", ">".cyan().bold());
-        io::stdout().flush()?;
-
         // Wait for stdin while responding to server heartbeat pings
         let raw_input = loop {
             tokio::select! {
                 line = stdin_rx.recv() => {
                     match line {
-                        Some(l) if l.is_empty() => {
-                            println!("\nGoodbye!");
-                            let _ = sink.send(WsMessage::Close(None)).await;
-                            return Ok(());
-                        }
-                        Some(l) => break l,
-                        None => {
-                            println!("\nGoodbye!");
+                        Some(Some(l)) => break l,
+                        Some(None) | None => {
+                            println!("Goodbye!");
                             let _ = sink.send(WsMessage::Close(None)).await;
                             return Ok(());
                         }
@@ -350,13 +373,12 @@ async fn main() -> Result<()> {
             loop {
                 print!("{} ", "..".dimmed());
                 io::stdout().flush()?;
-                // In multiline mode, read lines directly (brief enough that missing pings is OK)
                 let raw_line = loop {
                     tokio::select! {
                         line = stdin_rx.recv() => {
                             match line {
-                                Some(l) => break l,
-                                None => break String::new(),
+                                Some(Some(l)) => break l,
+                                _ => break String::new(),
                             }
                         }
                         msg = stream.next() => {

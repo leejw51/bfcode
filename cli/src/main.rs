@@ -26,13 +26,9 @@ mod types;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use colored::Colorize;
-use crossterm::{
-    event::{
-        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyModifiers,
-        KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
-    },
-    execute, terminal,
-};
+use rustyline::config::Configurer;
+use rustyline::history::DefaultHistory;
+use rustyline::{DefaultEditor, Editor};
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1970,19 +1966,23 @@ async fn run_interactive(initial_message: Option<String>, oneshot: bool) -> Resu
         }
     }
 
-    loop {
-        print!("{} ", ">".cyan().bold());
-        std::io::stdout().flush()?;
+    let mut rl = create_editor()?;
 
-        let input = match read_input_line()? {
-            Some(s) => s,
-            None => {
-                println!("\nGoodbye!");
+    loop {
+        let input = match rl.readline(&format!("{} ", ">".cyan().bold())) {
+            Ok(line) => line,
+            Err(rustyline::error::ReadlineError::Interrupted | rustyline::error::ReadlineError::Eof) => {
+                println!("Goodbye!");
                 break;
             }
+            Err(e) => return Err(anyhow::anyhow!("input error: {e}")),
         };
 
         let input = input.trim();
+        if !input.is_empty() {
+            let _ = rl.add_history_entry(input);
+            let _ = rl.save_history(&history_file_path());
+        }
         if input.is_empty() {
             // While idle, drain any pending cron prompt requests
             while let Ok(req) = cron_rx.try_recv() {
@@ -2130,140 +2130,24 @@ async fn run_interactive(initial_message: Option<String>, oneshot: bool) -> Resu
     Ok(())
 }
 
-/// Read a line of input using crossterm raw mode.
-/// Shift+Enter inserts a newline; Enter submits.
-/// Returns None on EOF (Ctrl+D).
-fn read_input_line() -> Result<Option<String>> {
-    let mut stdout = std::io::stdout();
-    terminal::enable_raw_mode()?;
-    let _ = execute!(
-        stdout,
-        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
-    );
-    let _ = execute!(stdout, EnableBracketedPaste);
+/// Return the path used for persistent command history.
+fn history_file_path() -> std::path::PathBuf {
+    let dir = dirs::data_dir()
+        .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from(".")))
+        .join("bfcode");
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join("history.txt")
+}
 
-    let mut buf = String::new();
-    // Image path stored separately so it doesn't clutter the visible input
-    let mut image_path: Option<String> = None;
-
-    let result = loop {
-        match event::read() {
-            Ok(Event::Key(KeyEvent {
-                code, modifiers, ..
-            })) => match (modifiers, code) {
-                // Ctrl+C / Ctrl+D → EOF
-                (KeyModifiers::CONTROL, KeyCode::Char('c' | 'd')) => {
-                    break Ok(None);
-                }
-                // Ctrl+V — check clipboard for image
-                (KeyModifiers::CONTROL, KeyCode::Char('v')) => {
-                    if image_path.is_none() && clipboard_has_image() {
-                        image_path = Some("@clipboard".to_string());
-                        write!(
-                            stdout,
-                            "\r\n  {} {}\r\n> {}",
-                            "✓".green(),
-                            "image pasted".green(),
-                            buf
-                        )?;
-                        stdout.flush()?;
-                    } else if image_path.is_none() {
-                        // No image — paste text from clipboard if available
-                        if let Some(text) = clipboard_text() {
-                            buf.push_str(&text);
-                            write!(stdout, "{text}")?;
-                            stdout.flush()?;
-                        }
-                    }
-                    // If image already pasted, ignore duplicate Ctrl+V
-                }
-                // Shift+Enter → newline
-                (KeyModifiers::SHIFT, KeyCode::Enter) => {
-                    buf.push('\n');
-                    write!(stdout, "\r\n  ")?;
-                    stdout.flush()?;
-                }
-                // Enter (without Shift) → submit
-                (_, KeyCode::Enter) => {
-                    write!(stdout, "\r\n")?;
-                    stdout.flush()?;
-                    // Prepend image path to user text if an image was pasted
-                    let final_buf = if let Some(img) = image_path.take() {
-                        if buf.trim().is_empty() {
-                            format!("{img} describe this image")
-                        } else {
-                            format!("{img} {buf}")
-                        }
-                    } else {
-                        buf
-                    };
-                    break Ok(Some(final_buf));
-                }
-                // Backspace
-                (_, KeyCode::Backspace) => {
-                    if let Some(ch) = buf.pop() {
-                        if ch == '\n' {
-                            write!(stdout, "\r\n")?;
-                            write!(stdout, "\r")?;
-                        } else {
-                            write!(stdout, "\x08 \x08")?;
-                            stdout.flush()?;
-                        }
-                    }
-                }
-                // Regular character
-                (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c)) => {
-                    buf.push(c);
-                    write!(stdout, "{c}")?;
-                    stdout.flush()?;
-                }
-                _ => {}
-            },
-            // Bracketed paste — terminal sends pasted text as a single event.
-            // On macOS, Cmd+V with a clipboard image often pastes a temp file path
-            // like /var/folders/.../clipboard-*.png
-            Ok(Event::Paste(text)) => {
-                let trimmed = text.trim();
-                if image_path.is_none() && is_pasted_image_path(trimmed) {
-                    // macOS pasted an image file path — store it separately
-                    image_path = Some(trimmed.to_string());
-                    write!(
-                        stdout,
-                        "\r\n  {} {}\r\n> {}",
-                        "✓".green(),
-                        "image pasted".green(),
-                        buf
-                    )?;
-                    stdout.flush()?;
-                } else if trimmed.is_empty() && image_path.is_none() && clipboard_has_image() {
-                    // Empty paste but clipboard has image
-                    image_path = Some("@clipboard".to_string());
-                    write!(
-                        stdout,
-                        "\r\n  {} {}\r\n> {}",
-                        "✓".green(),
-                        "image pasted".green(),
-                        buf
-                    )?;
-                    stdout.flush()?;
-                } else if image_path.is_some() && is_pasted_image_path(trimmed) {
-                    // Duplicate image paste — ignore silently
-                } else if !text.is_empty() {
-                    // Normal text paste
-                    buf.push_str(&text);
-                    write!(stdout, "{text}")?;
-                    stdout.flush()?;
-                }
-            }
-            Ok(_) => {} // ignore resize, mouse, etc.
-            Err(e) => break Err(anyhow::anyhow!("input error: {e}")),
-        }
-    };
-
-    let _ = execute!(stdout, DisableBracketedPaste);
-    let _ = execute!(stdout, PopKeyboardEnhancementFlags);
-    terminal::disable_raw_mode()?;
-    result
+/// Create a new rustyline editor with history loaded.
+fn create_editor() -> Result<Editor<(), DefaultHistory>> {
+    let mut rl = DefaultEditor::new()?;
+    rl.set_max_history_size(1000)?;
+    let hist = history_file_path();
+    if hist.exists() {
+        let _ = rl.load_history(&hist);
+    }
+    Ok(rl)
 }
 
 async fn process_user_message(
