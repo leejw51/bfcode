@@ -192,7 +192,7 @@ jobs:
           rm -f "$RUNNER_TEMP/cert.p12"
 
   build-gui-love:
-    name: Build GUI (.love)
+    name: Build GUI (.love + icons)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -201,13 +201,48 @@ jobs:
         uses: love-actions/love-actions-core@v1
         with:
           build-list: gui
-          package-path: ${{ github.workspace }}/bfcode-gui.love
+          package-path: ./bfcode-gui.love
+
+      - name: Generate icons from icon.png
+        run: |
+          sudo apt-get update && sudo apt-get install -y imagemagick icnsutils
+          SRC="gui/assets/icon.png"
+          # Resize to 256x256 base
+          convert "$SRC" -resize 256x256 icon.png
+          # ICO for Windows (multi-size)
+          convert icon.png \
+            \( -clone 0 -resize 16x16 \) \
+            \( -clone 0 -resize 32x32 \) \
+            \( -clone 0 -resize 48x48 \) \
+            \( -clone 0 -resize 64x64 \) \
+            \( -clone 0 -resize 128x128 \) \
+            \( -clone 0 -resize 256x256 \) \
+            -delete 0 icon.ico
+          # ICNS for macOS
+          mkdir -p icon.iconset
+          for size in 16 32 64 128 256 512; do
+            convert icon.png -resize ${size}x${size} "icon.iconset/icon_${size}x${size}.png"
+          done
+          for size in 16 32 128 256; do
+            double=$((size * 2))
+            cp "icon.iconset/icon_${double}x${double}.png" "icon.iconset/icon_${size}x${size}@2x.png"
+          done
+          png2icns icon.icns icon.iconset/icon_*.png
 
       - name: Upload .love artifact
         uses: actions/upload-artifact@v4
         with:
           name: bfcode-gui-love
-          path: ${{ github.workspace }}/bfcode-gui.love
+          path: ./bfcode-gui.love
+
+      - name: Upload icons artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bfcode-gui-icons
+          path: |
+            icon.png
+            icon.ico
+            icon.icns
 
   build-gui-windows:
     name: Build GUI (Windows)
@@ -221,19 +256,25 @@ jobs:
         with:
           name: bfcode-gui-love
 
+      - name: Download icons
+        uses: actions/download-artifact@v4
+        with:
+          name: bfcode-gui-icons
+
       - name: Build Windows
         uses: love-actions/love-actions-windows@v1
         with:
-          love-package: ${{ github.workspace }}/bfcode-gui.love
-          app-name: "bfcode-gui"
+          love-package: ./bfcode-gui.love
+          icon-path: ./icon.ico
+          product-name: bfcode-gui
           version-string: ${{ github.ref_name }}
-          output-folder: ${{ github.workspace }}/release-gui
+          output-folder: ./release-gui
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
           name: bfcode-gui-windows
-          path: ${{ github.workspace }}/release-gui/
+          path: ./release-gui/
 
   build-gui-linux:
     name: Build GUI (Linux)
@@ -247,19 +288,26 @@ jobs:
         with:
           name: bfcode-gui-love
 
+      - name: Download icons
+        uses: actions/download-artifact@v4
+        with:
+          name: bfcode-gui-icons
+
       - name: Build Linux AppImage
         uses: love-actions/love-actions-linux@v2
         with:
-          love-package: ${{ github.workspace }}/bfcode-gui.love
-          app-name: "bfcode-gui"
+          love-package: ./bfcode-gui.love
+          icon-path: ./icon.png
+          app-name: bfcode-gui
+          product-name: bfcode-gui
           version-string: ${{ github.ref_name }}
-          output-folder: ${{ github.workspace }}/release-gui
+          output-folder: ./release-gui
 
       - name: Upload Linux artifact
         uses: actions/upload-artifact@v4
         with:
           name: bfcode-gui-linux
-          path: ${{ github.workspace }}/release-gui/
+          path: ./release-gui/
 
   build-gui-macos:
     name: Build GUI (macOS)
@@ -273,23 +321,35 @@ jobs:
         with:
           name: bfcode-gui-love
 
+      - name: Download icons
+        uses: actions/download-artifact@v4
+        with:
+          name: bfcode-gui-icons
+
       - name: Build macOS (portable)
         uses: love-actions/love-actions-macos-portable@v1
         with:
-          love-package: ${{ github.workspace }}/bfcode-gui.love
-          app-name: "bfcode-gui"
+          love-package: ./bfcode-gui.love
+          icon-path: ./icon.icns
+          app-name: bfcode-gui
+          product-name: bfcode-gui
           version-string: ${{ github.ref_name }}
-          output-folder: ${{ github.workspace }}/release-gui
+          output-folder: ./release-gui
+          account-username: ${{ secrets.APPLE_ID }}
+          account-password: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          developer-id-application-base64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          developer-id-application-password: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          team-id: ${{ secrets.TEAM_ID }}
 
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v4
         with:
           name: bfcode-gui-macos
-          path: ${{ github.workspace }}/release-gui/
+          path: ./release-gui/
 
   release:
     name: Create Release
-    needs: [build, build-gui-love, build-gui-windows, build-gui-linux, build-gui-macos]
+    needs: [build, build-gui-windows, build-gui-linux, build-gui-macos]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
