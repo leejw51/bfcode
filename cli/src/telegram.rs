@@ -341,7 +341,8 @@ async fn process_telegram_message(state: &BotState, chat_id: i64, input: &str) -
 
     // Agent loop (max 25 rounds)
     let mut final_text = String::new();
-    for _round in 0..25 {
+    let mut recent_tool_calls: Vec<(String, String)> = Vec::new();
+    for round in 0..25 {
         let messages = session.conversation.clone();
         let model = config.model.clone();
         let temp = config.temperature;
@@ -385,11 +386,33 @@ async fn process_telegram_message(state: &BotState, chat_id: i64, input: &str) -
                 .conversation
                 .push(Message::assistant_tool_calls(tool_calls.clone()));
 
+            let mut doom_detected = false;
             for tc in tool_calls {
+                // Doom loop detection
+                let call_key = (tc.function.name.clone(), tc.function.arguments.clone());
+                recent_tool_calls.push(call_key.clone());
+                if recent_tool_calls.len() >= 3 {
+                    let tail = &recent_tool_calls[recent_tool_calls.len() - 3..];
+                    if tail.iter().all(|c| c == &call_key) {
+                        eprintln!(
+                            "  {} [chat:{chat_id}] Doom loop: '{}' called 3x with same args",
+                            "⊘".red(),
+                            tc.function.name
+                        );
+                        session.conversation.push(Message::tool_result(
+                            &tc.id,
+                            "Error: Doom loop detected — try a different approach.",
+                        ));
+                        doom_detected = true;
+                        break;
+                    }
+                }
+
                 eprintln!(
-                    "  {} [chat:{chat_id}] tool: {}",
+                    "  {} [chat:{chat_id}] tool: {} (round {}/25)",
                     ">>>".cyan(),
-                    tc.function.name
+                    tc.function.name,
+                    round + 1
                 );
 
                 let result = tools::execute_tool(
@@ -403,6 +426,9 @@ async fn process_telegram_message(state: &BotState, chat_id: i64, input: &str) -
                 session
                     .conversation
                     .push(Message::tool_result(&tc.id, &result));
+            }
+            if doom_detected {
+                break;
             }
             continue; // next round — let LLM process tool results
         }

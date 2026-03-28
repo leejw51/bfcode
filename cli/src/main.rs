@@ -36,6 +36,9 @@ use types::{GlobalConfig, Message, ProjectSession};
 
 const MAX_TOOL_ROUNDS: usize = 25;
 
+/// Number of consecutive identical tool calls before triggering doom loop detection.
+const DOOM_LOOP_THRESHOLD: usize = 3;
+
 // Spinner frames (braille pattern)
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -1967,9 +1970,10 @@ async fn run_interactive(initial_message: Option<String>, oneshot: bool) -> Resu
     }
 
     let mut rl = create_editor()?;
+    let prompt = format!("{} ", ">".cyan().bold());
 
     loop {
-        let input = match rl.readline(&format!("{} ", ">".cyan().bold())) {
+        let input = match rl.readline(&prompt) {
             Ok(line) => line,
             Err(rustyline::error::ReadlineError::Interrupted | rustyline::error::ReadlineError::Eof) => {
                 println!("Goodbye!");
@@ -2252,22 +2256,42 @@ async fn process_user_message(
 
     // Agent loop
     let mut error_occurred = false;
-    for _round in 0..MAX_TOOL_ROUNDS {
+    // Doom loop detection: track recent (tool_name, args) pairs
+    let mut recent_tool_calls: Vec<(String, String)> = Vec::new();
+    // Ctrl+C abort flag for graceful cancellation
+    let abort_flag = Arc::new(AtomicBool::new(false));
+    let abort_clone = abort_flag.clone();
+    let ctrlc_handler = tokio::spawn(async move {
+        if let Ok(()) = tokio::signal::ctrl_c().await {
+            abort_clone.store(true, Ordering::Relaxed);
+            eprintln!("\n  {} Agent loop interrupted by user.", "⊘".yellow().bold());
+        }
+    });
+    for round in 0..MAX_TOOL_ROUNDS {
+        // Check for Ctrl+C abort
+        if abort_flag.load(Ordering::Relaxed) {
+            eprintln!("  {} Aborting agent loop (conversation saved).", "~".yellow());
+            break;
+        }
+        // Show round counter (only after first round)
+        if round > 0 {
+            eprintln!(
+                "  {} Round {}/{}",
+                "↻".cyan(),
+                round + 1,
+                MAX_TOOL_ROUNDS,
+            );
+        }
         // Use streaming for text generation
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-
-        let messages = session.conversation.clone();
-        let tools_clone = tool_defs.to_vec();
-        let model = config.model.clone();
-        let temp = config.temperature;
 
         // Start spinner while waiting for API response
         let spinner_running = Arc::new(AtomicBool::new(true));
         let spinner_handle = start_spinner(spinner_running.clone());
 
-        // Spawn streaming request
+        // Spawn streaming request — pass references directly to avoid cloning
         let stream_result = client
-            .chat_stream(&messages, &tools_clone, &model, temp, tx)
+            .chat_stream(&session.conversation, tool_defs, &config.model, config.temperature, tx)
             .await;
 
         // Stop spinner
@@ -2336,6 +2360,31 @@ async fn process_user_message(
                 .push(Message::assistant_tool_calls(tool_calls.clone()));
 
             for tc in tool_calls {
+                // Doom loop detection: check if this exact tool+args was called recently
+                let call_key = (tc.function.name.clone(), tc.function.arguments.clone());
+                recent_tool_calls.push(call_key.clone());
+                if recent_tool_calls.len() >= DOOM_LOOP_THRESHOLD {
+                    let tail = &recent_tool_calls[recent_tool_calls.len() - DOOM_LOOP_THRESHOLD..];
+                    if tail.iter().all(|c| c == &call_key) {
+                        eprintln!(
+                            "  {} Doom loop detected: '{}' called {} times with identical arguments. Breaking loop.",
+                            "⊘".red().bold(),
+                            tc.function.name,
+                            DOOM_LOOP_THRESHOLD,
+                        );
+                        session.conversation.push(Message::tool_result(
+                            &tc.id,
+                            &format!(
+                                "Error: Doom loop detected — tool '{}' called {} times with identical arguments. \
+                                 Try a different approach or different arguments.",
+                                tc.function.name, DOOM_LOOP_THRESHOLD,
+                            ),
+                        ));
+                        error_occurred = true;
+                        break;
+                    }
+                }
+
                 // Fire tool_before hook
                 let hook_ctx = plugin::HookContext {
                     session_id: session.id.clone(),
@@ -2392,6 +2441,10 @@ async fn process_user_message(
                 session
                     .conversation
                     .push(Message::tool_result(&tc.id, &result));
+            }
+            // Break outer loop if doom loop was detected
+            if error_occurred {
+                break;
             }
             continue;
         }
@@ -2455,6 +2508,9 @@ async fn process_user_message(
         break;
     }
 
+    // Clean up the Ctrl+C handler
+    ctrlc_handler.abort();
+
     // Fire error hook if needed
     if error_occurred {
         let ctx = plugin::HookContext {
@@ -2471,7 +2527,13 @@ async fn process_user_message(
         session.conversation.pop();
     }
 
-    persistence::save_session(session)?;
+    // Save session in a background thread to avoid blocking input
+    let session_snapshot = session.clone();
+    tokio::task::spawn_blocking(move || {
+        if let Err(e) = persistence::save_session(&session_snapshot) {
+            eprintln!("  {} Failed to save session: {e}", "⚠".yellow());
+        }
+    });
     Ok(())
 }
 

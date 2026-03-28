@@ -1186,6 +1186,40 @@ async fn exec_bash(arguments: &str) -> Result<String> {
     let stderr = String::from_utf8_lossy(&result.stderr);
     let exit = result.status.code().unwrap_or(-1);
 
+    // Detect commands that failed because they require interactive input
+    if exit != 0 {
+        let combined = format!("{stdout}{stderr}").to_lowercase();
+        let interactive_indicators = [
+            "eoferror",
+            "not a terminal",
+            "no tty",
+            "input not from terminal",
+            "stdin is not a tty",
+            "the input device is not a tty",
+            "cannot read input",
+            "raw_input",
+            "readline()",
+            "scanner(system.in)",
+            "broken pipe",
+        ];
+        if interactive_indicators
+            .iter()
+            .any(|ind| combined.contains(ind))
+        {
+            let mut output = format!("Error: This command requires interactive user input, which is not supported in this environment.\n");
+            output.push_str("The program tried to read from stdin but no terminal is attached.\n");
+            output.push_str(&format!("Please run this command directly in your terminal.\n\n"));
+            output.push_str(&format!("exit code: {exit}\n"));
+            if !stdout.is_empty() {
+                output.push_str(&format!("stdout:\n{stdout}"));
+            }
+            if !stderr.is_empty() {
+                output.push_str(&format!("stderr:\n{stderr}"));
+            }
+            return Ok(output);
+        }
+    }
+
     let mut output = format!("exit code: {exit}\n");
     if !stdout.is_empty() {
         output.push_str(&format!("stdout:\n{stdout}"));
