@@ -218,16 +218,11 @@ jobs:
             \( -clone 0 -resize 128x128 \) \
             \( -clone 0 -resize 256x256 \) \
             -delete 0 icon.ico
-          # ICNS for macOS
-          mkdir -p icon.iconset
-          for size in 16 32 64 128 256 512; do
-            convert icon.png -resize ${size}x${size} "icon.iconset/icon_${size}x${size}.png"
+          # ICNS for macOS (png2icns only needs distinct sizes, no @2x)
+          for size in 16 32 48 128 256; do
+            convert icon.png -resize ${size}x${size} "icon_${size}.png"
           done
-          for size in 16 32 128 256; do
-            double=$((size * 2))
-            cp "icon.iconset/icon_${double}x${double}.png" "icon.iconset/icon_${size}x${size}@2x.png"
-          done
-          png2icns icon.icns icon.iconset/icon_*.png
+          png2icns icon.icns icon_16.png icon_32.png icon_48.png icon_128.png icon_256.png
 
       - name: Upload .love artifact
         uses: actions/upload-artifact@v4
