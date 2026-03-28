@@ -176,9 +176,11 @@ jobs:
       - name: Generate macOS icon
         run: |
           SRC="gui/assets/icon.png"
+          # Convert source to actual PNG format first
+          sips -s format png "$SRC" --out source_icon.png
           mkdir -p icon.iconset
           for size in 16 32 64 128 256 512; do
-            sips -z $size $size "$SRC" --out "icon.iconset/icon_${size}x${size}.png"
+            sips -s format png -z $size $size source_icon.png --out "icon.iconset/icon_${size}x${size}.png"
           done
           for size in 16 32 128 256; do
             double=$((size * 2))
