@@ -191,9 +191,57 @@ jobs:
           security delete-keychain "$RUNNER_TEMP/build.keychain-db" 2>/dev/null || true
           rm -f "$RUNNER_TEMP/cert.p12"
 
+  build-gui:
+    name: Build GUI (LÖVE)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build .love package
+        uses: love-actions/love-actions-core@v1
+        with:
+          build-list: gui
+          package-path: ${{ github.workspace }}/bfcode-gui.love
+
+      - name: Build Windows
+        uses: love-actions/love-actions-windows@v1
+        with:
+          love-package: ${{ github.workspace }}/bfcode-gui.love
+          app-name: "bfcode-gui"
+          version-string: ${{ github.ref_name }}
+          output-folder: ${{ github.workspace }}/release-gui
+
+      - name: Build Linux AppImage
+        uses: love-actions/love-actions-linux@v2
+        with:
+          love-package: ${{ github.workspace }}/bfcode-gui.love
+          app-name: "bfcode-gui"
+          version-string: ${{ github.ref_name }}
+          output-folder: ${{ github.workspace }}/release-gui
+
+      - name: Build macOS (portable)
+        uses: love-actions/love-actions-macos-portable@v1
+        with:
+          love-package: ${{ github.workspace }}/bfcode-gui.love
+          app-name: "bfcode-gui"
+          version-string: ${{ github.ref_name }}
+          output-folder: ${{ github.workspace }}/release-gui
+
+      - name: Upload .love artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bfcode-gui-love
+          path: ${{ github.workspace }}/bfcode-gui.love
+
+      - name: Upload GUI distributables
+        uses: actions/upload-artifact@v4
+        with:
+          name: bfcode-gui-distributables
+          path: ${{ github.workspace }}/release-gui/
+
   release:
     name: Create Release
-    needs: build
+    needs: [build, build-gui]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -207,10 +255,10 @@ jobs:
         run: |
           mkdir -p release
           for dir in artifacts/*/; do
-            cp "$dir"* release/
+            cp "$dir"* release/ 2>/dev/null || true
           done
           cd release
-          sha256sum *.zip > checksums.txt
+          sha256sum * > checksums.txt
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
