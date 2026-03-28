@@ -234,37 +234,56 @@ jobs:
             echo "APPLE_SIGNING_IDENTITY=-" >> $GITHUB_ENV
           fi
 
+      # ── Create entitlements for LuaJIT ─────────────────────────────────
+      - name: Create entitlements
+        run: |
+          /usr/libexec/PlistBuddy -c "Add :com.apple.security.cs.allow-jit bool true" entitlements.plist
+          /usr/libexec/PlistBuddy -c "Add :com.apple.security.cs.allow-unsigned-executable-memory bool true" entitlements.plist
+          /usr/libexec/PlistBuddy -c "Add :com.apple.security.cs.disable-library-validation bool true" entitlements.plist
+          echo "Entitlements:"
+          cat entitlements.plist
+
       # ── Sign the .app bundle (frameworks first, then app) ─────────────
       - name: Codesign macOS app
         run: |
           APP="love-macos/bfcode-gui.app"
 
-          # Sign all embedded frameworks individually
-          find "$APP/Contents/Frameworks" -type f -perm +111 -o -name "*.dylib" | while read f; do
-            codesign --force --options runtime \
-              --sign "$APPLE_SIGNING_IDENTITY" \
-              --timestamp "$f"
+          # Sign all Mach-O binaries inside frameworks
+          find "$APP/Contents/Frameworks" -type f | while read f; do
+            if file "$f" | grep -q "Mach-O"; then
+              echo "Signing: $f"
+              codesign --force --options runtime \
+                --sign "$APPLE_SIGNING_IDENTITY" \
+                --entitlements entitlements.plist \
+                --timestamp "$f"
+            fi
           done
 
           # Sign framework bundles
-          find "$APP/Contents/Frameworks" -name "*.framework" | while read f; do
+          find "$APP/Contents/Frameworks" -name "*.framework" -maxdepth 1 | while read f; do
+            echo "Signing framework: $f"
             codesign --force --options runtime \
               --sign "$APPLE_SIGNING_IDENTITY" \
+              --entitlements entitlements.plist \
               --timestamp "$f"
           done
 
           # Sign the main executable
           codesign --force --options runtime \
             --sign "$APPLE_SIGNING_IDENTITY" \
+            --entitlements entitlements.plist \
             --timestamp "$APP/Contents/MacOS/love"
 
           # Sign the outer app bundle
           codesign --force --options runtime \
             --sign "$APPLE_SIGNING_IDENTITY" \
+            --entitlements entitlements.plist \
             --timestamp "$APP"
 
           echo "Signed bfcode-gui.app:"
           codesign -dv --verbose=2 "$APP" 2>&1 | head -5
+          echo "Checking entitlements:"
+          codesign -d --entitlements - "$APP" 2>&1 | head -20
           echo "Verifying signature..."
           codesign --verify --deep --strict "$APP"
 
