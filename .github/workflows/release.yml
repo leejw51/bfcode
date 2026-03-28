@@ -11,7 +11,7 @@ permissions:
 jobs:
   test:
     name: Test
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -19,27 +19,17 @@ jobs:
         working-directory: cli
         run: cargo test
 
-  build:
-    name: Build (${{ matrix.target }})
+  build-cli:
+    name: Build CLI (${{ matrix.target }})
     needs: test
-    runs-on: ${{ matrix.os }}
+    runs-on: macos-latest
     strategy:
       matrix:
         include:
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-            artifact: bfcode-linux-amd64
-            client_artifact: bfcode_client-linux-amd64
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-            artifact: bfcode-linux-arm64
-            client_artifact: bfcode_client-linux-arm64
           - target: x86_64-apple-darwin
-            os: macos-latest
             artifact: bfcode-darwin-amd64
             client_artifact: bfcode_client-darwin-amd64
           - target: aarch64-apple-darwin
-            os: macos-latest
             artifact: bfcode-darwin-arm64
             client_artifact: bfcode_client-darwin-arm64
 
@@ -49,50 +39,31 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install cross-compilation tools (Linux ARM64)
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
-
       # ── Build ─────────────────────────────────────────────────────────
       - name: Build release
         working-directory: cli
         run: cargo build --release --target ${{ matrix.target }}
 
-      # ── macOS: Import certificate ─────────────────────────────────────
+      # ── Import certificate ────────────────────────────────────────────
       - name: Import codesigning certificate
-        if: runner.os == 'macOS'
         env:
           P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
           P12_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
         run: |
-          # Decode .p12 from base64
           echo "$P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
-
-          # Create a temporary keychain
           KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
           KEYCHAIN_PASSWORD="$(openssl rand -base64 32)"
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
           security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-
-          # Import certificate
           security import "$RUNNER_TEMP/cert.p12" \
             -k "$KEYCHAIN_PATH" \
             -P "$P12_PASSWORD" \
             -T /usr/bin/codesign \
             -T /usr/bin/security
-
-          # Allow codesign to access the keychain without prompting
           security set-key-partition-list -S apple-tool:,apple:,codesign: \
             -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-
-          # Add to search list
           security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
-
-          # Resolve signing identity
           CERT_INFO=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep "Developer ID Application" || true)
           if [ -n "$CERT_INFO" ]; then
             CERT_ID=$(echo "$CERT_INFO" | head -1 | awk -F'"' '{print $2}')
@@ -103,9 +74,8 @@ jobs:
             echo "APPLE_SIGNING_IDENTITY=-" >> $GITHUB_ENV
           fi
 
-      # ── macOS: Sign binaries ──────────────────────────────────────────
+      # ── Sign binaries ────────────────────────────────────────────────
       - name: Codesign macOS binaries
-        if: runner.os == 'macOS'
         run: |
           BFCODE="cli/target/${{ matrix.target }}/release/bfcode"
           CLIENT="cli/target/${{ matrix.target }}/release/bfcode-client"
@@ -125,9 +95,8 @@ jobs:
           echo "Signed bfcode-client:"
           codesign -dv --verbose=2 "$CLIENT" 2>&1 | head -5
 
-      # ── macOS: Notarize binaries ──────────────────────────────────────
+      # ── Notarize binaries ────────────────────────────────────────────
       - name: Notarize macOS binaries
-        if: runner.os == 'macOS'
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
@@ -136,7 +105,6 @@ jobs:
           BFCODE="cli/target/${{ matrix.target }}/release/bfcode"
           CLIENT="cli/target/${{ matrix.target }}/release/bfcode-client"
 
-          # Notarization requires zip archives
           ditto -c -k "$BFCODE" "$RUNNER_TEMP/bfcode-notarize.zip"
           ditto -c -k "$CLIENT" "$RUNNER_TEMP/client-notarize.zip"
 
@@ -154,11 +122,10 @@ jobs:
             --team-id "$TEAM_ID" \
             --wait --timeout 10m
 
-          # Staple (may not work for standalone CLI binaries, that's OK)
           xcrun stapler staple "$BFCODE" 2>/dev/null || echo "Staple skipped for CLI binary"
           xcrun stapler staple "$CLIENT" 2>/dev/null || echo "Staple skipped for CLI binary"
 
-      # ── Package: sign first, then zip (only zips are kept) ────────────
+      # ── Package as zip ───────────────────────────────────────────────
       - name: Package binaries as zip
         run: |
           mkdir -p dist/staging
@@ -184,19 +151,20 @@ jobs:
           name: ${{ matrix.client_artifact }}
           path: dist/${{ matrix.client_artifact }}.zip
 
-      # ── Cleanup keychain ──────────────────────────────────────────────
+      # ── Cleanup keychain ─────────────────────────────────────────────
       - name: Cleanup keychain
-        if: runner.os == 'macOS' && always()
+        if: always()
         run: |
           security delete-keychain "$RUNNER_TEMP/build.keychain-db" 2>/dev/null || true
           rm -f "$RUNNER_TEMP/cert.p12"
 
-  build-gui-love:
-    name: Build GUI (.love + icons)
-    runs-on: ubuntu-latest
+  build-gui:
+    name: Build GUI (macOS)
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
+      # ── Build .love package ──────────────────────────────────────────
       - name: Build .love package
         run: |
           cd gui
@@ -204,163 +172,21 @@ jobs:
             -x "build/*" -x ".*" -x "Makefile" -x "*.py" \
             -x "generated_images/*" -x "__pycache__/*" -x "README.md"
 
-      - name: Generate icons from icon.png
+      # ── Generate .icns icon ──────────────────────────────────────────
+      - name: Generate macOS icon
         run: |
-          sudo apt-get update && sudo apt-get install -y imagemagick icnsutils
           SRC="gui/assets/icon.png"
-          # Resize to 256x256 base
-          convert "$SRC" -resize 256x256 icon.png
-          # ICO for Windows (multi-size)
-          convert icon.png \
-            \( -clone 0 -resize 16x16 \) \
-            \( -clone 0 -resize 32x32 \) \
-            \( -clone 0 -resize 48x48 \) \
-            \( -clone 0 -resize 64x64 \) \
-            \( -clone 0 -resize 128x128 \) \
-            \( -clone 0 -resize 256x256 \) \
-            -delete 0 icon.ico
-          # ICNS for macOS (png2icns only needs distinct sizes, no @2x)
-          for size in 16 32 48 128 256; do
-            convert icon.png -resize ${size}x${size} "icon_${size}.png"
+          mkdir -p icon.iconset
+          for size in 16 32 64 128 256 512; do
+            sips -z $size $size "$SRC" --out "icon.iconset/icon_${size}x${size}.png"
           done
-          png2icns icon.icns icon_16.png icon_32.png icon_48.png icon_128.png icon_256.png
+          for size in 16 32 128 256; do
+            double=$((size * 2))
+            cp "icon.iconset/icon_${double}x${double}.png" "icon.iconset/icon_${size}x${size}@2x.png"
+          done
+          iconutil -c icns icon.iconset -o icon.icns
 
-      - name: Upload .love artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: bfcode-gui-love
-          path: ./bfcode-gui.love
-
-      - name: Upload icons artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: bfcode-gui-icons
-          path: |
-            icon.png
-            icon.ico
-            icon.icns
-
-  build-gui-windows:
-    name: Build GUI (Windows)
-    needs: build-gui-love
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download .love package
-        uses: actions/download-artifact@v4
-        with:
-          name: bfcode-gui-love
-
-      # ── Download official LÖVE Windows and embed game ─────────────────
-      - name: Package Windows (x64)
-        run: |
-          curl -L -o love-win64.zip \
-            "https://github.com/love2d/love/releases/download/11.5/love-11.5-win64.zip"
-          unzip love-win64.zip -d love-win64
-          LOVE_DIR="love-win64/love-11.5-win64"
-          # Fuse love.exe + .love into single executable
-          cat "${LOVE_DIR}/love.exe" bfcode-gui.love > "${LOVE_DIR}/bfcode-gui.exe"
-          rm -f "${LOVE_DIR}/love.exe" "${LOVE_DIR}/lovec.exe" \
-                "${LOVE_DIR}/changes.txt" "${LOVE_DIR}/readme.txt" \
-                "${LOVE_DIR}/game.ico" "${LOVE_DIR}/love.ico"
-          mkdir -p release-gui
-          cd love-win64
-          mv "love-11.5-win64" "bfcode-gui"
-          zip -9 -r ../release-gui/bfcode-gui-windows-x64.zip bfcode-gui
-
-      - name: Package Windows (x86)
-        run: |
-          curl -L -o love-win32.zip \
-            "https://github.com/love2d/love/releases/download/11.5/love-11.5-win32.zip"
-          unzip love-win32.zip -d love-win32
-          LOVE_DIR="love-win32/love-11.5-win32"
-          cat "${LOVE_DIR}/love.exe" bfcode-gui.love > "${LOVE_DIR}/bfcode-gui.exe"
-          rm -f "${LOVE_DIR}/love.exe" "${LOVE_DIR}/lovec.exe" \
-                "${LOVE_DIR}/changes.txt" "${LOVE_DIR}/readme.txt" \
-                "${LOVE_DIR}/game.ico" "${LOVE_DIR}/love.ico"
-          cd love-win32
-          mv "love-11.5-win32" "bfcode-gui"
-          zip -9 -r ../release-gui/bfcode-gui-windows-x86.zip bfcode-gui
-
-      - name: Upload Windows artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: bfcode-gui-windows
-          path: ./release-gui/
-
-  build-gui-linux:
-    name: Build GUI (Linux)
-    needs: build-gui-love
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download .love package
-        uses: actions/download-artifact@v4
-        with:
-          name: bfcode-gui-love
-
-      - name: Download icons
-        uses: actions/download-artifact@v4
-        with:
-          name: bfcode-gui-icons
-
-      # ── Download official LÖVE Linux AppImage and embed game ──────────
-      - name: Package Linux (x86_64)
-        run: |
-          # Download LÖVE AppImage
-          curl -L -o love.AppImage \
-            "https://github.com/love2d/love/releases/download/11.5/love-11.5-x86_64.AppImage"
-          chmod +x love.AppImage
-
-          # Extract, embed .love, repack
-          ./love.AppImage --appimage-extract
-          cat squashfs-root/bin/love bfcode-gui.love > squashfs-root/bin/bfcode-gui
-          chmod +x squashfs-root/bin/bfcode-gui
-          rm squashfs-root/bin/love
-
-          # Replace icon
-          cp icon.png squashfs-root/love.png 2>/dev/null || true
-
-          # Update .desktop file
-          sed -i 's/^Name=.*/Name=bfcode-gui/' squashfs-root/*.desktop
-          sed -i 's|^Exec=.*|Exec=bfcode-gui|' squashfs-root/*.desktop
-
-          # Repack AppImage
-          curl -L -o appimagetool \
-            "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage"
-          chmod +x appimagetool
-          ARCH=x86_64 ./appimagetool squashfs-root
-
-          mkdir -p release-gui
-          mv *.AppImage release-gui/bfcode-gui-linux-x86_64.AppImage || \
-          mv bfcode-gui*.AppImage release-gui/bfcode-gui-linux-x86_64.AppImage
-
-      - name: Upload Linux artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: bfcode-gui-linux
-          path: ./release-gui/
-
-  build-gui-macos:
-    name: Build GUI (macOS)
-    needs: build-gui-love
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download .love package
-        uses: actions/download-artifact@v4
-        with:
-          name: bfcode-gui-love
-
-      - name: Download icons
-        uses: actions/download-artifact@v4
-        with:
-          name: bfcode-gui-icons
-
-      # ── Download official LÖVE and embed game ─────────────────────────
+      # ── Download official LÖVE and embed game ────────────────────────
       - name: Package macOS app
         run: |
           curl -L -o love-macos.zip \
@@ -368,7 +194,6 @@ jobs:
           unzip love-macos.zip -d love-macos
           APP="love-macos/love.app"
           cp bfcode-gui.love "$APP/Contents/Resources/game.love"
-          # Update plist
           plutil -replace CFBundleName -string "bfcode-gui" "$APP/Contents/Info.plist"
           plutil -replace CFBundleExecutable -string "love" "$APP/Contents/Info.plist"
           plutil -replace CFBundleIdentifier -string "com.bfcode.gui" "$APP/Contents/Info.plist"
@@ -465,6 +290,12 @@ jobs:
           cd love-macos
           ditto -c -k --sequesterRsrc --keepParent bfcode-gui.app ../release-gui/bfcode-gui-macos.zip
 
+      - name: Upload .love artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bfcode-gui-love
+          path: bfcode-gui.love
+
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v4
         with:
@@ -480,7 +311,7 @@ jobs:
 
   release:
     name: Create Release
-    needs: [build, build-gui-windows, build-gui-linux, build-gui-macos]
+    needs: [build-cli, build-gui]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
