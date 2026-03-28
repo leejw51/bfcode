@@ -39,7 +39,7 @@ name = "bfcode"
 path = "src/main.rs"
 
 [[bin]]
-name = "bfcode-client"
+name = "bfcode-cli"
 path = "src/bin/bfcode_client.rs"
 
 [dev-dependencies]

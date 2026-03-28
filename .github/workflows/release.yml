@@ -20,29 +20,19 @@ jobs:
         run: cargo test
 
   build-cli:
-    name: Build CLI (${{ matrix.target }})
+    name: Build CLI (aarch64-apple-darwin)
     needs: test
     runs-on: macos-latest
-    strategy:
-      matrix:
-        include:
-          - target: x86_64-apple-darwin
-            artifact: bfcode-darwin-amd64
-            client_artifact: bfcode_client-darwin-amd64
-          - target: aarch64-apple-darwin
-            artifact: bfcode-darwin-arm64
-            client_artifact: bfcode_client-darwin-arm64
-
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: aarch64-apple-darwin
 
       # ── Build ─────────────────────────────────────────────────────────
       - name: Build release
         working-directory: cli
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --target aarch64-apple-darwin
 
       # ── Import certificate ────────────────────────────────────────────
       - name: Import codesigning certificate
@@ -77,8 +67,8 @@ jobs:
       # ── Sign binaries ────────────────────────────────────────────────
       - name: Codesign macOS binaries
         run: |
-          BFCODE="cli/target/${{ matrix.target }}/release/bfcode"
-          CLIENT="cli/target/${{ matrix.target }}/release/bfcode-client"
+          BFCODE="cli/target/aarch64-apple-darwin/release/bfcode"
+          CLI="cli/target/aarch64-apple-darwin/release/bfcode-cli"
 
           codesign --force --options runtime \
             --sign "$APPLE_SIGNING_IDENTITY" \
@@ -88,12 +78,12 @@ jobs:
           codesign --force --options runtime \
             --sign "$APPLE_SIGNING_IDENTITY" \
             --timestamp \
-            "$CLIENT"
+            "$CLI"
 
           echo "Signed bfcode:"
           codesign -dv --verbose=2 "$BFCODE" 2>&1 | head -5
-          echo "Signed bfcode-client:"
-          codesign -dv --verbose=2 "$CLIENT" 2>&1 | head -5
+          echo "Signed bfcode-cli:"
+          codesign -dv --verbose=2 "$CLI" 2>&1 | head -5
 
       # ── Notarize binaries ────────────────────────────────────────────
       - name: Notarize macOS binaries
@@ -102,11 +92,11 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           TEAM_ID: ${{ secrets.TEAM_ID }}
         run: |
-          BFCODE="cli/target/${{ matrix.target }}/release/bfcode"
-          CLIENT="cli/target/${{ matrix.target }}/release/bfcode-client"
+          BFCODE="cli/target/aarch64-apple-darwin/release/bfcode"
+          CLI="cli/target/aarch64-apple-darwin/release/bfcode-cli"
 
           ditto -c -k "$BFCODE" "$RUNNER_TEMP/bfcode-notarize.zip"
-          ditto -c -k "$CLIENT" "$RUNNER_TEMP/client-notarize.zip"
+          ditto -c -k "$CLI" "$RUNNER_TEMP/cli-notarize.zip"
 
           echo "Submitting bfcode for notarization..."
           xcrun notarytool submit "$RUNNER_TEMP/bfcode-notarize.zip" \
@@ -115,41 +105,41 @@ jobs:
             --team-id "$TEAM_ID" \
             --wait --timeout 10m
 
-          echo "Submitting bfcode-client for notarization..."
-          xcrun notarytool submit "$RUNNER_TEMP/client-notarize.zip" \
+          echo "Submitting bfcode-cli for notarization..."
+          xcrun notarytool submit "$RUNNER_TEMP/cli-notarize.zip" \
             --apple-id "$APPLE_ID" \
             --password "$APPLE_APP_SPECIFIC_PASSWORD" \
             --team-id "$TEAM_ID" \
             --wait --timeout 10m
 
           xcrun stapler staple "$BFCODE" 2>/dev/null || echo "Staple skipped for CLI binary"
-          xcrun stapler staple "$CLIENT" 2>/dev/null || echo "Staple skipped for CLI binary"
+          xcrun stapler staple "$CLI" 2>/dev/null || echo "Staple skipped for CLI binary"
 
       # ── Package as zip ───────────────────────────────────────────────
       - name: Package binaries as zip
         run: |
           mkdir -p dist/staging
-          cp cli/target/${{ matrix.target }}/release/bfcode dist/staging/${{ matrix.artifact }}
-          chmod +x dist/staging/${{ matrix.artifact }}
-          cp cli/target/${{ matrix.target }}/release/bfcode-client dist/staging/${{ matrix.client_artifact }}
-          chmod +x dist/staging/${{ matrix.client_artifact }}
+          cp cli/target/aarch64-apple-darwin/release/bfcode dist/staging/bfcode-darwin-arm64
+          chmod +x dist/staging/bfcode-darwin-arm64
+          cp cli/target/aarch64-apple-darwin/release/bfcode-cli dist/staging/bfcode-cli-darwin-arm64
+          chmod +x dist/staging/bfcode-cli-darwin-arm64
 
           cd dist/staging
-          zip "../${{ matrix.artifact }}.zip" "${{ matrix.artifact }}"
-          zip "../${{ matrix.client_artifact }}.zip" "${{ matrix.client_artifact }}"
+          zip "../bfcode-darwin-arm64.zip" "bfcode-darwin-arm64"
+          zip "../bfcode-cli-darwin-arm64.zip" "bfcode-cli-darwin-arm64"
           rm -rf ../staging
 
-      - name: Upload artifact (zip)
+      - name: Upload bfcode artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: dist/${{ matrix.artifact }}.zip
+          name: bfcode-darwin-arm64
+          path: dist/bfcode-darwin-arm64.zip
 
-      - name: Upload client artifact (zip)
+      - name: Upload bfcode-cli artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.client_artifact }}
-          path: dist/${{ matrix.client_artifact }}.zip
+          name: bfcode-cli-darwin-arm64
+          path: dist/bfcode-cli-darwin-arm64.zip
 
       # ── Cleanup keychain ─────────────────────────────────────────────
       - name: Cleanup keychain

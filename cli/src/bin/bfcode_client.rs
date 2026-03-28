@@ -1,8 +1,8 @@
 //! WebSocket REPL client for connecting to a bfcode gateway server.
 //!
 //! Usage:
-//!   bfcode-client --url ws://127.0.0.1:8642/v1/ws
-//!   bfcode-client -u ws://myserver:9000/v1/ws -k myapikey
+//!   bfcode-cli --url ws://127.0.0.1:8642/v1/ws
+//!   bfcode-cli -u ws://myserver:9000/v1/ws -k myapikey
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
@@ -18,7 +18,7 @@ use tokio_tungstenite::tungstenite::Message as WsMessage;
 // ---------------------------------------------------------------------------
 
 #[derive(Parser)]
-#[command(name = "bfcode-client", about = "WebSocket REPL client for bfcode gateway")]
+#[command(name = "bfcode-cli", about = "WebSocket REPL client for bfcode gateway")]
 struct Args {
     /// Gateway URL (HTTP base or WebSocket endpoint)
     #[arg(short = 'u', long, default_value = "http://127.0.0.1:8642")]
@@ -213,7 +213,7 @@ async fn main() -> Result<()> {
 
     println!(
         "{} connecting via WebSocket to {}",
-        "bfcode-client".cyan().bold(),
+        "bfcode-cli".cyan().bold(),
         ws_url.green()
     );
 
@@ -233,7 +233,7 @@ async fn main() -> Result<()> {
                     let uptime = status.get("uptime_secs").and_then(|v| v.as_u64()).unwrap_or(0);
                     println!(
                         "{} gateway v{} (mode: {}, uptime: {}s)",
-                        "bfcode-client".cyan().bold(),
+                        "bfcode-cli".cyan().bold(),
                         version.yellow(),
                         mode,
                         uptime
@@ -243,7 +243,7 @@ async fn main() -> Result<()> {
             _ => {
                 eprintln!(
                     "{} could not reach gateway status endpoint",
-                    "bfcode-client".cyan().bold(),
+                    "bfcode-cli".cyan().bold(),
                 );
             }
         }
@@ -254,7 +254,7 @@ async fn main() -> Result<()> {
 
     println!(
         "{} WebSocket connected",
-        "bfcode-client".cyan().bold(),
+        "bfcode-cli".cyan().bold(),
     );
 
     // Create session via WebSocket or use provided session ID
@@ -262,7 +262,7 @@ async fn main() -> Result<()> {
         Some(sid) => {
             println!(
                 "{} resuming session: {}",
-                "bfcode-client".cyan().bold(),
+                "bfcode-cli".cyan().bold(),
                 sid.yellow()
             );
             sid.clone()
@@ -425,7 +425,7 @@ async fn main() -> Result<()> {
                 // Try to reconnect
                 eprintln!(
                     "{} attempting to reconnect...",
-                    "bfcode-client".cyan().bold()
+                    "bfcode-cli".cyan().bold()
                 );
                 match connect_ws(&ws_url, args.key.as_deref()).await {
                     Ok((new_sink, new_stream)) => {
@@ -433,13 +433,13 @@ async fn main() -> Result<()> {
                         stream = new_stream;
                         eprintln!(
                             "{} reconnected",
-                            "bfcode-client".cyan().bold()
+                            "bfcode-cli".cyan().bold()
                         );
                     }
                     Err(e) => {
                         eprintln!(
                             "{} reconnect failed: {}",
-                            "bfcode-client".cyan().bold(),
+                            "bfcode-cli".cyan().bold(),
                             format!("{:#}", e).red()
                         );
                     }
