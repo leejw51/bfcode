@@ -407,15 +407,39 @@ jobs:
             echo "APPLE_SIGNING_IDENTITY=-" >> $GITHUB_ENV
           fi
 
-      # ── Sign the .app bundle ──────────────────────────────────────────
+      # ── Sign the .app bundle (frameworks first, then app) ─────────────
       - name: Codesign macOS app
         run: |
-          codesign --force --deep --options runtime \
+          APP="love-macos/bfcode-gui.app"
+
+          # Sign all embedded frameworks individually
+          find "$APP/Contents/Frameworks" -type f -perm +111 -o -name "*.dylib" | while read f; do
+            codesign --force --options runtime \
+              --sign "$APPLE_SIGNING_IDENTITY" \
+              --timestamp "$f"
+          done
+
+          # Sign framework bundles
+          find "$APP/Contents/Frameworks" -name "*.framework" | while read f; do
+            codesign --force --options runtime \
+              --sign "$APPLE_SIGNING_IDENTITY" \
+              --timestamp "$f"
+          done
+
+          # Sign the main executable
+          codesign --force --options runtime \
             --sign "$APPLE_SIGNING_IDENTITY" \
-            --timestamp \
-            "love-macos/bfcode-gui.app"
+            --timestamp "$APP/Contents/MacOS/love"
+
+          # Sign the outer app bundle
+          codesign --force --options runtime \
+            --sign "$APPLE_SIGNING_IDENTITY" \
+            --timestamp "$APP"
+
           echo "Signed bfcode-gui.app:"
-          codesign -dv --verbose=2 "love-macos/bfcode-gui.app" 2>&1 | head -5
+          codesign -dv --verbose=2 "$APP" 2>&1 | head -5
+          echo "Verifying signature..."
+          codesign --verify --deep --strict "$APP"
 
       # ── Notarize ──────────────────────────────────────────────────────
       - name: Notarize macOS app
