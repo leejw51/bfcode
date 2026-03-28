@@ -119,27 +119,27 @@ jobs:
       - name: Package binaries as zip
         run: |
           mkdir -p dist/staging
-          cp cli/target/aarch64-apple-darwin/release/bfcode dist/staging/bfcode-darwin-arm64
-          chmod +x dist/staging/bfcode-darwin-arm64
-          cp cli/target/aarch64-apple-darwin/release/bfcode-cli dist/staging/bfcode-cli-darwin-arm64
-          chmod +x dist/staging/bfcode-cli-darwin-arm64
+          cp cli/target/aarch64-apple-darwin/release/bfcode dist/staging/bfcode-macos-arm64
+          chmod +x dist/staging/bfcode-macos-arm64
+          cp cli/target/aarch64-apple-darwin/release/bfcode-cli dist/staging/bfcode_cli-macos-arm64
+          chmod +x dist/staging/bfcode_cli-macos-arm64
 
           cd dist/staging
-          zip "../bfcode-darwin-arm64.zip" "bfcode-darwin-arm64"
-          zip "../bfcode-cli-darwin-arm64.zip" "bfcode-cli-darwin-arm64"
+          zip "../bfcode-macos-arm64.zip" "bfcode-macos-arm64"
+          zip "../bfcode_cli-macos-arm64.zip" "bfcode_cli-macos-arm64"
           rm -rf ../staging
 
       - name: Upload bfcode artifact
         uses: actions/upload-artifact@v4
         with:
-          name: bfcode-darwin-arm64
-          path: dist/bfcode-darwin-arm64.zip
+          name: bfcode-macos-arm64
+          path: dist/bfcode-macos-arm64.zip
 
       - name: Upload bfcode-cli artifact
         uses: actions/upload-artifact@v4
         with:
-          name: bfcode-cli-darwin-arm64
-          path: dist/bfcode-cli-darwin-arm64.zip
+          name: bfcode_cli-macos-arm64
+          path: dist/bfcode_cli-macos-arm64.zip
 
       # ── Cleanup keychain ─────────────────────────────────────────────
       - name: Cleanup keychain
@@ -299,7 +299,7 @@ jobs:
         run: |
           mkdir -p release-gui
           cd love-macos
-          ditto -c -k --sequesterRsrc --keepParent bfcode-gui.app ../release-gui/bfcode-gui-macos.zip
+          ditto -c -k --sequesterRsrc --keepParent bfcode-gui.app ../release-gui/bfcode_gui-macos-arm64.zip
 
       - name: Upload .love artifact
         uses: actions/upload-artifact@v4
@@ -310,7 +310,7 @@ jobs:
       - name: Upload macOS artifact
         uses: actions/upload-artifact@v4
         with:
-          name: bfcode-gui-macos
+          name: bfcode_gui-macos-arm64
           path: ./release-gui/
 
       # ── Cleanup keychain ──────────────────────────────────────────────
