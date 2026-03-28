@@ -296,6 +296,7 @@ jobs:
           app-name: bfcode-gui
           product-name: bfcode-gui
           version-string: ${{ github.ref_name }}
+          build-deb: "false"
           output-folder: ./release-gui
 
       - name: Upload Linux artifact
