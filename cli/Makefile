@@ -1,4 +1,4 @@
-.PHONY: help build release install clean test test-gateway format gateway stop
+.PHONY: help build release install clean test test-cron test-gateway format gateway stop
 
 .DEFAULT_GOAL := help
 
@@ -11,6 +11,7 @@ help:
 	@echo "  release        Build release binaries"
 	@echo "  install        Build release and install to ~/.local/bin/"
 	@echo "  test           Run unit tests (cargo test)"
+	@echo "  test-cron      Run all cron job tests (incl. AI prompt)"
 	@echo "  test-gateway   Run gateway integration tests (Python)"
 	@echo "  gateway        Start as gateway mode (HTTP API server)"
 	@echo "  stop           Stop all backend processes"
@@ -41,6 +42,9 @@ stop:
 
 test:
 	cargo test
+
+test-cron: install
+	cargo test --test cron_jobs -- --nocapture --test-threads=1
 
 test-gateway: build
 	python3 tests/test_gateway.py

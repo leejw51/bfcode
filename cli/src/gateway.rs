@@ -122,6 +122,8 @@ pub(crate) struct ServerState {
     pub(crate) started_at: Instant,
     pub(crate) config: GatewayConfig,
     pub(crate) tailscale_ip: Option<String>,
+    /// Broadcast sender for cron job output — websocket clients subscribe to receive notifications.
+    pub(crate) cron_output_tx: tokio::sync::broadcast::Sender<crate::cron::CronOutput>,
 }
 
 type AppState = Arc<Mutex<ServerState>>;
@@ -133,12 +135,14 @@ impl ServerState {
         } else {
             None
         };
+        let (cron_output_tx, _) = tokio::sync::broadcast::channel(64);
         Self {
             sessions: HashMap::new(),
             total_requests: 0,
             started_at: Instant::now(),
             tailscale_ip: ts_ip,
             config,
+            cron_output_tx,
         }
     }
 
@@ -230,6 +234,30 @@ pub async fn start_server(config: &GatewayConfig, verbose: bool) -> Result<()> {
     }
 
     let state: AppState = Arc::new(Mutex::new(ServerState::new(config.clone())));
+
+    // Start cron scheduler so jobs fire and output is broadcast to WS clients.
+    {
+        let cron_output_tx = {
+            let st = state.lock().await;
+            st.cron_output_tx.clone()
+        };
+        let (cron_prompt_tx, _cron_prompt_rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::cron::CronPromptRequest>();
+        let cron_manager = crate::cron::CronManager::load();
+        let cron_job_count = cron_manager
+            .list_jobs()
+            .iter()
+            .filter(|j| j.enabled)
+            .count();
+        let _cron_handle = cron_manager.start_scheduler(cron_prompt_tx, cron_output_tx);
+        if cron_job_count > 0 {
+            eprintln!(
+                "{} Cron: {} active job(s) scheduled",
+                "bfcode".cyan().bold(),
+                cron_job_count,
+            );
+        }
+    }
 
     let app = build_router(state.clone());
 
@@ -567,6 +595,12 @@ async fn handle_websocket(socket: WebSocket, state: AppState) {
     // Channel for async chat responses to be sent back on the WS
     let (reply_tx, mut reply_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
+    // Subscribe to cron output broadcast
+    let mut cron_rx = {
+        let st = state.lock().await;
+        st.cron_output_tx.subscribe()
+    };
+
     // Track last pong received (initialized to now so the first heartbeat check passes)
     let last_pong = Arc::new(Mutex::new(Instant::now()));
     let mut heartbeat_interval = tokio::time::interval(heartbeat_interval_dur);
@@ -631,6 +665,25 @@ async fn handle_websocket(socket: WebSocket, state: AppState) {
             reply = reply_rx.recv() => {
                 if let Some(reply) = reply {
                     if ws_tx.send(AxumWsMessage::Text(reply.into())).await.is_err() {
+                        break;
+                    }
+                }
+            }
+            // Cron job output notifications
+            cron_output = cron_rx.recv() => {
+                if let Ok(output) = cron_output {
+                    let msg = serde_json::json!({
+                        "type": "cron_output",
+                        "job_id": output.job_id,
+                        "kind": output.kind,
+                        "description": output.description,
+                        "command": output.command,
+                        "status": output.status,
+                        "stdout": output.stdout,
+                        "stderr": output.stderr,
+                        "timestamp": output.timestamp,
+                    });
+                    if ws_tx.send(AxumWsMessage::Text(msg.to_string().into())).await.is_err() {
                         break;
                     }
                 }

@@ -799,6 +799,7 @@ You have vision capability. When the user attaches an image (via @clipboard or @
 - task: Launch a subagent to handle a complex multi-step task autonomously. Provide description (3-5 words), prompt (full task), and optional subagent_type. The subagent runs in a separate session with its own context.
 - todowrite: Write/update the session todo list. Provide todos array with content, status (pending/in_progress/completed/cancelled), and priority (high/medium/low). Replaces the entire todo list.
 - todoread: Read the current session todo list. Returns all todos with their status and priority.
+- cron: Manage scheduled cron jobs. Actions: add (schedule + command), remove (id), list, enable (id), disable (id). Schedule supports shorthand ("10s", "5m", "1h", "daily") or 6-field cron expressions ("*/10 * * * * *"). Kind: "shell" (run command) or "prompt" (send to AI). When user asks to schedule, add cron, or run something periodically, use this tool.
 - plan_enter: Enter plan mode (read-only). In plan mode, write/edit/apply_patch tools are disabled. Only reads, searches, and writing to .bfcode/plans/ are allowed. Use this to create a detailed plan before implementation.
 - plan_exit: Exit plan mode and return to build mode where all tools are available.
 

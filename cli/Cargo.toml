@@ -15,6 +15,7 @@ tokio = { version = "1", features = ["full"] }
 dirs = "6"
 colored = "3"
 chrono = "0.4"
+cron = "0.15"
 arboard = "3"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 pdf-extract = "0.7"

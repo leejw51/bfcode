@@ -1109,6 +1109,34 @@ fn run_skills_command(cmd: SkillsCommands) -> Result<()> {
     }
 }
 
+/// Print a cron output message to the terminal.
+fn print_cron_output(output: &cron::CronOutput) {
+    println!();
+    println!(
+        "{} job {} ({}): {}",
+        "[cron]".yellow(),
+        output.job_id.cyan(),
+        output.kind.dimmed(),
+        if output.status == "ok" {
+            output.status.green().to_string()
+        } else {
+            output.status.red().to_string()
+        },
+    );
+    if let Some(ref stdout) = output.stdout {
+        let trimmed = stdout.trim();
+        if !trimmed.is_empty() {
+            println!("{} {}", "[cron]".yellow(), trimmed);
+        }
+    }
+    if let Some(ref stderr) = output.stderr {
+        let trimmed = stderr.trim();
+        if !trimmed.is_empty() {
+            println!("{} {}", "[cron]".yellow(), trimmed.red());
+        }
+    }
+}
+
 fn run_cron_command(cmd: CronCommands) -> Result<()> {
     let mut manager = cron::CronManager::load();
     match cmd {
@@ -1928,19 +1956,22 @@ async fn run_interactive(initial_message: Option<String>, oneshot: bool) -> Resu
 
     // Start cron scheduler in background
     let (cron_tx, mut cron_rx) = tokio::sync::mpsc::unbounded_channel::<cron::CronPromptRequest>();
+    let (cron_output_tx, mut cron_output_rx) = tokio::sync::broadcast::channel::<cron::CronOutput>(64);
     let cron_manager = cron::CronManager::load();
     let cron_job_count = cron_manager
         .list_jobs()
         .iter()
         .filter(|j| j.enabled)
         .count();
-    let cron_handle = cron_manager.start_scheduler(cron_tx);
+    let cron_handle = cron_manager.start_scheduler(cron_tx, cron_output_tx.clone());
     if cron_job_count > 0 && !oneshot {
         eprintln!(
             "{}",
             format!("Cron: {} active job(s) scheduled", cron_job_count).dimmed()
         );
     }
+
+    // No separate display task — cron output is handled in the main select! loop
 
     // If an initial message was provided, process it first
     if let Some(ref msg) = initial_message {
@@ -1969,46 +2000,100 @@ async fn run_interactive(initial_message: Option<String>, oneshot: bool) -> Resu
         }
     }
 
-    let mut rl = create_editor()?;
     let prompt = format!("{} ", ">".cyan().bold());
 
-    loop {
-        let input = match rl.readline(&prompt) {
-            Ok(line) => line,
-            Err(rustyline::error::ReadlineError::Interrupted | rustyline::error::ReadlineError::Eof) => {
-                println!("Goodbye!");
+    // Readline runs in a dedicated OS thread (it blocks and isn't Send).
+    // We communicate via channels: main sends "ready" signal, thread sends input back.
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
+    let (input_tx, mut input_rx) =
+        tokio::sync::mpsc::unbounded_channel::<Result<String, rustyline::error::ReadlineError>>();
+
+    let prompt_for_thread = prompt.clone();
+    std::thread::spawn(move || {
+        let mut rl = match create_editor() {
+            Ok(rl) => rl,
+            Err(_) => return,
+        };
+        // Wait for main to signal "ready for input"
+        while ready_rx.recv().is_ok() {
+            let result = rl.readline(&prompt_for_thread);
+            if let Ok(ref line) = result {
+                let trimmed = line.trim();
+                if !trimmed.is_empty() {
+                    let _ = rl.add_history_entry(trimmed);
+                    let _ = rl.save_history(&history_file_path());
+                }
+            }
+            if input_tx.send(result).is_err() {
                 break;
             }
-            Err(e) => return Err(anyhow::anyhow!("input error: {e}")),
+        }
+    });
+
+    // Signal readline thread: ready for first prompt
+    if ready_tx.send(()).is_err() {
+        return Err(anyhow::anyhow!("readline thread died"));
+    }
+
+    loop {
+        // Main select! loop: wait on readline input OR cron output OR cron prompt
+        let input = loop {
+            tokio::select! {
+                // User typed something
+                result = input_rx.recv() => {
+                    match result {
+                        Some(Ok(line)) => break line,
+                        Some(Err(
+                            rustyline::error::ReadlineError::Interrupted
+                            | rustyline::error::ReadlineError::Eof,
+                        )) => {
+                            println!("Goodbye!");
+                            cron_handle.abort();
+                            return Ok(());
+                        }
+                        Some(Err(e)) => return Err(anyhow::anyhow!("input error: {e}")),
+                        None => {
+                            cron_handle.abort();
+                            return Ok(());
+                        }
+                    }
+                }
+                // Cron job produced output
+                result = cron_output_rx.recv() => {
+                    if let Ok(output) = result {
+                        print_cron_output(&output);
+                    }
+                }
+                // Cron prompt job needs AI processing
+                result = cron_rx.recv() => {
+                    if let Some(req) = result {
+                        println!();
+                        println!(
+                            "{} processing cron prompt job {}: {}",
+                            "[cron]".yellow(),
+                            req.job_id.cyan(),
+                            req.prompt.dimmed(),
+                        );
+                        process_user_message(
+                            &req.prompt,
+                            &mut session,
+                            &mut config,
+                            &full_system_prompt,
+                            client.as_ref(),
+                            &tool_defs,
+                            &permissions,
+                            &hook_mgr,
+                        )
+                        .await?;
+                    }
+                }
+            }
         };
 
         let input = input.trim();
-        if !input.is_empty() {
-            let _ = rl.add_history_entry(input);
-            let _ = rl.save_history(&history_file_path());
-        }
         if input.is_empty() {
-            // While idle, drain any pending cron prompt requests
-            while let Ok(req) = cron_rx.try_recv() {
-                println!();
-                println!(
-                    "{} processing cron prompt job {}: {}",
-                    "[cron]".yellow(),
-                    req.job_id.cyan(),
-                    req.prompt.dimmed(),
-                );
-                process_user_message(
-                    &req.prompt,
-                    &mut session,
-                    &mut config,
-                    &full_system_prompt,
-                    client.as_ref(),
-                    &tool_defs,
-                    &permissions,
-                    &hook_mgr,
-                )
-                .await?;
-            }
+            // Signal readline: ready for next prompt
+            let _ = ready_tx.send(());
             continue;
         }
 
@@ -2092,27 +2177,13 @@ async fn run_interactive(initial_message: Option<String>, oneshot: bool) -> Resu
         )
         .await?;
 
-        // After processing user message, drain any pending cron prompt jobs
-        while let Ok(req) = cron_rx.try_recv() {
-            println!();
-            println!(
-                "{} processing cron prompt job {}: {}",
-                "[cron]".yellow(),
-                req.job_id.cyan(),
-                req.prompt.dimmed(),
-            );
-            process_user_message(
-                &req.prompt,
-                &mut session,
-                &mut config,
-                &full_system_prompt,
-                client.as_ref(),
-                &tool_defs,
-                &permissions,
-                &hook_mgr,
-            )
-            .await?;
+        // After processing, drain any buffered cron output
+        while let Ok(output) = cron_output_rx.try_recv() {
+            print_cron_output(&output);
         }
+
+        // Signal readline: ready for next prompt
+        let _ = ready_tx.send(());
     }
 
     // Stop cron scheduler

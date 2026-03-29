@@ -583,6 +583,47 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         });
     }
 
+    // Cron job management tool — always available
+    tools.push(ToolDefinition {
+        tool_type: "function".into(),
+        function: FunctionSchema {
+            name: "cron".into(),
+            description: "Manage scheduled cron jobs. Add, remove, list, enable, or disable recurring shell commands or AI prompts. Schedule supports shorthand (\"10s\", \"5m\", \"1h\", \"daily\") or standard 6-field cron expressions (\"*/10 * * * * *\").".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["add", "remove", "list", "enable", "disable"],
+                        "description": "Action to perform"
+                    },
+                    "schedule": {
+                        "type": "string",
+                        "description": "Schedule: shorthand (\"10s\",\"5m\",\"1h\",\"daily\") or cron expr (\"*/10 * * * * *\"). Required for 'add'."
+                    },
+                    "command": {
+                        "type": "string",
+                        "description": "Shell command or AI prompt to execute. Required for 'add'."
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Human-readable description of the job. Optional for 'add'."
+                    },
+                    "kind": {
+                        "type": "string",
+                        "enum": ["shell", "prompt"],
+                        "description": "Job type: 'shell' (run command) or 'prompt' (send to AI). Default 'shell'."
+                    },
+                    "id": {
+                        "type": "string",
+                        "description": "Job ID. Required for 'remove', 'enable', 'disable'."
+                    }
+                },
+                "required": ["action"]
+            }),
+        },
+    });
+
     tools
 }
 
@@ -824,6 +865,13 @@ async fn execute_tool_inner(
         "todoread" => exec_todoread(session_id).await,
         "plan_enter" => exec_plan_enter(arguments).await,
         "plan_exit" => exec_plan_exit().await,
+        "cron" => {
+            let result = crate::cron::exec_cron_tool(arguments);
+            match result {
+                Ok(msg) => Ok(msg),
+                Err(e) => Err(e),
+            }
+        }
         "lsp" => crate::lsp::execute(arguments).await,
         _ if name.starts_with("mcp_") => {
             // Dispatch to MCP manager
@@ -979,6 +1027,20 @@ pub fn print_tool_call(name: &str, arguments: &str) {
                 format!("entering plan mode ({name})")
             }
             "plan_exit" => "exiting plan mode".to_string(),
+            "cron" => {
+                let action = v["action"].as_str().unwrap_or("");
+                let cmd = v["command"].as_str().unwrap_or("");
+                let sched = v["schedule"].as_str().unwrap_or("");
+                let id = v["id"].as_str().unwrap_or("");
+                match action {
+                    "add" => format!("add: {cmd} ({sched})"),
+                    "remove" => format!("remove: {id}"),
+                    "list" => "list".to_string(),
+                    "enable" => format!("enable: {id}"),
+                    "disable" => format!("disable: {id}"),
+                    _ => action.to_string(),
+                }
+            }
             _ => arguments.to_string(),
         },
         Err(_) => arguments.to_string(),
@@ -2754,9 +2816,9 @@ mod tests {
     #[test]
     fn test_tool_definitions_count() {
         let defs = get_tool_definitions();
-        // Base: 28 tools, +1 if BRAVE/TAVILY key set, +1 if OPENAI key set
+        // Base tools + optional ones depending on env keys
         assert!(
-            defs.len() >= 28 && defs.len() <= 30,
+            defs.len() >= 28 && defs.len() <= 33,
             "got {} tools",
             defs.len()
         );

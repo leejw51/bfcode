@@ -174,7 +174,7 @@ async fn connect_ws(ws_url: &str, api_key: Option<&str>) -> Result<(WsSink, WsSt
 }
 
 /// Send a JSON message over WebSocket and wait for the response.
-/// Skips intermediate status messages like "thinking".
+/// Skips intermediate status messages like "thinking" and server-push messages like "cron_output".
 /// Responds to server Ping frames to keep the heartbeat alive.
 async fn ws_send_recv(
     sink: &mut WsSink,
@@ -186,16 +186,21 @@ async fn ws_send_recv(
         .await
         .context("Failed to send WebSocket message")?;
 
-    // Wait for response with timeout, skipping "thinking" acks
+    // Wait for response with timeout, skipping "thinking" acks and server-push messages
     let resp = tokio::time::timeout(Duration::from_secs(120), async {
         while let Some(msg) = stream.next().await {
             match msg {
                 Ok(WsMessage::Text(text)) => {
                     let json: serde_json::Value =
                         serde_json::from_str(&text).context("Invalid JSON from server")?;
-                    // Skip intermediate status messages (thinking, etc.)
                     let msg_type = json.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                    // Skip intermediate status messages (thinking, etc.)
                     if msg_type == "thinking" {
+                        continue;
+                    }
+                    // Print and skip server-push messages (cron_output, etc.)
+                    if msg_type == "cron_output" {
+                        print_server_push(&json);
                         continue;
                     }
                     return Ok(json);
@@ -217,6 +222,35 @@ async fn ws_send_recv(
     .context("Response timed out after 120 seconds")??;
 
     Ok(resp)
+}
+
+// ---------------------------------------------------------------------------
+// Server-push message display
+// ---------------------------------------------------------------------------
+
+/// Print a server-push message (e.g. cron_output) to the terminal.
+fn print_server_push(json: &serde_json::Value) {
+    let msg_type = json.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    if msg_type == "cron_output" {
+        let job_id = json.get("job_id").and_then(|v| v.as_str()).unwrap_or("?");
+        let kind = json.get("kind").and_then(|v| v.as_str()).unwrap_or("?");
+        let status = json.get("status").and_then(|v| v.as_str()).unwrap_or("?");
+        let stdout = json.get("stdout").and_then(|v| v.as_str()).unwrap_or("");
+        let stderr = json.get("stderr").and_then(|v| v.as_str()).unwrap_or("");
+        eprintln!(
+            "\n{} job {} ({}) {}",
+            "[cron]".yellow(),
+            job_id.cyan(),
+            kind,
+            if status == "ok" { status.green().to_string() } else { status.red().to_string() },
+        );
+        if !stdout.trim().is_empty() {
+            eprintln!("{} {}", "[cron]".yellow(), stdout.trim());
+        }
+        if !stderr.trim().is_empty() {
+            eprintln!("{} {}", "[cron]".yellow(), stderr.trim().red());
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -338,7 +372,7 @@ async fn main() -> Result<()> {
     });
 
     loop {
-        // Wait for stdin while responding to server heartbeat pings
+        // Wait for stdin while responding to server heartbeat pings and cron output
         let raw_input = loop {
             tokio::select! {
                 line = stdin_rx.recv() => {
@@ -352,11 +386,21 @@ async fn main() -> Result<()> {
                     }
                 }
                 msg = stream.next() => {
-                    if let Some(Ok(WsMessage::Ping(data))) = msg {
-                        let _ = sink.send(WsMessage::Pong(data)).await;
-                    } else if let Some(Ok(WsMessage::Close(_))) | None = msg {
-                        eprintln!("\n{} server closed connection", "bfcode-cli".cyan().bold());
-                        return Ok(());
+                    match msg {
+                        Some(Ok(WsMessage::Ping(data))) => {
+                            let _ = sink.send(WsMessage::Pong(data)).await;
+                        }
+                        Some(Ok(WsMessage::Text(text))) => {
+                            // Handle cron_output and other server-push messages while idle
+                            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                                print_server_push(&json);
+                            }
+                        }
+                        Some(Ok(WsMessage::Close(_))) | None => {
+                            eprintln!("\n{} server closed connection", "bfcode-cli".cyan().bold());
+                            return Ok(());
+                        }
+                        _ => {}
                     }
                 }
             }
